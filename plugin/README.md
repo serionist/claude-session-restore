@@ -4,7 +4,8 @@ Reopens the Claude Code sessions a crash, a Windows restart or a closed terminal
 
 After a restart, the next Claude session shows a band above the prompt: **Restore all**, **Choose**, **Dismiss**.
 Restoring opens one Windows Terminal window with a tab per session, each in its folder, running
-`claude --resume <id>` with the flags it was started with.
+`claude --resume <id>` with the flags it was started with. What a click did is written to the transcript, as a dim
+line the model never sees, and a session restored meanwhile from another window, or resumed by hand, is left alone.
 
 | Command | What |
 |---|---|

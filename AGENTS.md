@@ -20,7 +20,7 @@ crash, a restart or a closed terminal cut off. The repo is its own marketplace.
 
 | Path | What |
 |---|---|
-| `plugin/` | the plugin: `.claude-plugin/plugin.json` (name, version, the `shell` option), `hooks/` (`hooks.json`, `register.tsx`, `lib.ts`, `lib.test.ts`), `types/index.d.ts`, `tsconfig.json`, `README.md` |
+| `plugin/` | the plugin: `.claude-plugin/plugin.json` (name, version, the `shell` option), `hooks/` (`hooks.json`, `register.tsx`, `lib.ts`, and their tests `register.test.tsx`, `lib.test.ts`), `types/index.d.ts`, `tsconfig.json`, `README.md` |
 | `.claude-plugin/marketplace.json` | the marketplace: one plugin, source `./plugin` |
 | `docs/` | `design.md` (how it works), `releasing.md`; `plans/`, `reviews/`: dated records, never current truth |
 | `tools/` | `gate.ts` (the gate), `hooks.ts` (behind `.githooks/`), `setup.ts` (once per clone; `link` for skills), `gate.test.ts`, `launcher.test.ts` (the restore scripts in real PowerShell, on Windows); Node's standard library only |
@@ -113,7 +113,9 @@ What this code already paid for; `docs/design.md` has the detail.
 | A bare `claude` in PowerShell is npm's `claude.ps1`, which a Restricted policy refuses | `runArgvScript` | The program on PATH (`-CommandType Application`), with no flags |
 | Windows PowerShell writes to a pipe in the console's code page, garbling `C:\Users\Sóma` | `runPowerShell` | UTF-8 output first |
 | A shell `cd` in a tool moved `cwd()`, and the restore opened a folder `--resume` can't find the session from | `sync` | The record keeps `root()` |
-| The process lookup failed at startup, while MCP servers spawn | `beat` | Tried again on each heartbeat |
+| The process lookup failed at startup, while MCP servers spawn | `beat` | Tried again at heartbeats 1, 3, 7 and 15, then no more |
+| The band acted on the list as last scanned, and reopened a session already restored or resumed | `stillCutOff` | Restore and Dismiss scan again, one at a time |
+| A heartbeat's save landed after `/exit` closed the record, and the dead session was offered | `sync`, `save` | A count of ends; one write queue |
 | A session with no prompt has no transcript, and `--resume` finds nothing | `sync` | Tracked from its first turn |
 
 ## Look up APIs before coding against them

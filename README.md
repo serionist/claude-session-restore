@@ -14,7 +14,9 @@ api-server · docs · infra · +3 more
 ```
 
 **Restore all** opens one Windows Terminal window with a tab per session, each in its folder, each running
-`claude --resume <id>` with the flags it was started with. **Choose** opens a pane to pick them one by one.
+`claude --resume <id>` with the flags it was started with. **Choose** opens a pane to pick them one by one. What a
+click did is written to the transcript, as a dim line the model never sees, and a session restored meanwhile from
+another window, or resumed by hand, is left alone.
 
 ## Install
 

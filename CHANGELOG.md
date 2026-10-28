@@ -6,6 +6,19 @@ in the same PR; `docs/releasing.md` says how a release dates it.
 
 ## Unreleased
 
+### Fixed
+
+- The band's and the pane's Restore and Dismiss act on the sessions cut off at the moment of the click: one another
+  session restored, or that you resumed by hand, is left alone and counted, never opened a second time (#2).
+- What the band's and the pane's Restore did is in the transcript: the sessions reopened, a launch's error, a folder
+  that is gone, and on macOS and Linux the commands to run; a toast says which (#1).
+- A session you leave stays closed: a heartbeat that started just before `/exit` or `/clear` no longer saves it open
+  again, which offered it for restore once its process ended (#3).
+- Two clicks on Restore within a launch's seconds open each session once, and a session picked with `/resume` inside
+  another is tracked as soon as it is in place, before another band could reopen it.
+- Less work in the background: on Windows the claude process is looked for at most 5 times, over a session's first
+  15 minutes, and the messages are read for a title only after a new turn (#4).
+
 ## 0.1.0 (2026-10-28)
 
 The first public release.
