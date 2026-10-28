@@ -39,6 +39,10 @@ type Ctx = {
   writes: Promise<void>
   /** Process lookups tried; past LOOKUP_TRIES the session counts as gone by its heartbeat alone. */
   lookups: number
+  /** Heartbeats so far, counting the one at start: the lookups are spread over them. */
+  beats: number
+  /** The restore or dismiss running now; the next waits for it. */
+  acting: Promise<void>
   /** The turn count at which the messages were last read for a title. */
   titleTurns: number
 }
@@ -220,60 +224,98 @@ async function stillCutOff($: Engine, ctx: Ctx, ids: readonly string[]): Promise
   return [chosen, left > 0 ? [note] : []]
 }
 
-async function restore($: Engine, ctx: Ctx, ids: readonly string[]): Promise<string> {
-  const [chosen, lines] = await stillCutOff($, ctx, ids)
-  if (chosen.length === 0) return lines.length > 0 ? lines.join('\n') : 'No interrupted sessions to restore.'
-  if (!ctx.isWindows) return ['Run these to reopen them:', ...chosen.map(manualCommand), ...lines].join('\n')
+/**
+ * Restores and dismisses run one at a time: the band stays clickable while a launch runs, and a second click must
+ * scan after the first has marked its sessions, or each would open twice.
+ */
+function oneAtATime<T>(ctx: Ctx, work: () => Promise<T>): Promise<T> {
+  const run = ctx.acting.then(work)
+  ctx.acting = run.then(
+    () => undefined,
+    () => undefined,
+  )
 
-  const ready: SessionRecord[] = []
-  const gone: SessionRecord[] = []
-  for (const rec of chosen) ((await $.fs.exists(rec.cwd)) ? ready : gone).push(rec)
-
-  if (ready.length > 0) {
-    try {
-      await launch($, ctx, ready)
-      for (const rec of ready) await save($, ctx, { ...rec, status: 'restored' })
-      lines.unshift(`Reopened ${plural(ready.length, 'session')} in Windows Terminal.`)
-      $.ui.toast(`Reopened ${plural(ready.length, 'session')}`)
-    } catch (err) {
-      lines.unshift(`Could not open a terminal: ${err instanceof Error ? err.message : String(err)}`)
-      $.ui.toast('Could not reopen the sessions: see the transcript')
-    }
-  }
-  for (const rec of gone) lines.push(`Skipped "${labelOf(rec)}": ${rec.cwd} no longer exists.`)
-  await scan($, ctx)
-
-  return lines.join('\n')
+  return run
 }
 
-/** A click's result goes to the transcript, a dim line the model never sees; `/restore` returns it as its output. */
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
+function restore($: Engine, ctx: Ctx, ids: readonly string[]): Promise<string> {
+  return oneAtATime(ctx, async () => {
+    const [chosen, lines] = await stillCutOff($, ctx, ids)
+    if (chosen.length === 0) return lines.length > 0 ? lines.join('\n') : 'No interrupted sessions to restore.'
+    if (!ctx.isWindows) return ['Run these to reopen them:', ...chosen.map(manualCommand), ...lines].join('\n')
+
+    const ready: SessionRecord[] = []
+    const gone: SessionRecord[] = []
+    for (const rec of chosen) ((await $.fs.exists(rec.cwd)) ? ready : gone).push(rec)
+
+    if (ready.length > 0) {
+      let launched = false
+      try {
+        await launch($, ctx, ready)
+        launched = true
+      } catch (err) {
+        lines.unshift(`Could not open a terminal: ${errorText(err)}`)
+        $.ui.toast('Could not reopen the sessions: see the transcript')
+      }
+      // Apart from the launch: the sessions are open whatever a save says, and a second click must not reopen them.
+      if (launched) {
+        const reopened = `Reopened ${plural(ready.length, 'session')}`
+        try {
+          for (const rec of ready) await save($, ctx, { ...rec, status: 'restored' })
+          lines.unshift(`${reopened}.`)
+        } catch (err) {
+          lines.unshift(`${reopened}, but could not mark them restored (${errorText(err)}): they may be offered again.`)
+        }
+        $.ui.toast(reopened)
+      }
+    }
+    for (const rec of gone) lines.push(`Skipped "${labelOf(rec)}": ${rec.cwd} no longer exists.`)
+    await scan($, ctx)
+
+    return lines.join('\n')
+  })
+}
+
+/**
+ * A click's result goes to the transcript, a dim line the model never sees, one per line of it: the terminal draws a
+ * line's first 2,000 characters, and many commands to run would be cut. `/restore` returns it as its output.
+ */
 function restoreFromClick($: Engine, ctx: Ctx, ids: readonly string[]): void {
   void restore($, ctx, ids).then(
     text => {
-      $.ui.log(text)
+      for (const line of text.split('\n')) $.ui.log(line)
       if (!ctx.isWindows) $.ui.toast('The commands to reopen them are in the transcript')
     },
     err => {
-      $.ui.log(`Could not reopen the sessions: ${err instanceof Error ? err.message : String(err)}`)
+      $.ui.log(`Could not reopen the sessions: ${errorText(err)}`)
       $.ui.toast('Could not reopen the sessions: see the transcript')
     },
   )
 }
 
-async function dismiss($: Engine, ctx: Ctx, ids: readonly string[]): Promise<number> {
-  const [chosen] = await stillCutOff($, ctx, ids)
-  for (const rec of chosen) await save($, ctx, { ...rec, status: 'dismissed' })
-  await scan($, ctx)
+function dismiss($: Engine, ctx: Ctx, ids: readonly string[]): Promise<number> {
+  return oneAtATime(ctx, async () => {
+    const [chosen] = await stillCutOff($, ctx, ids)
+    for (const rec of chosen) await save($, ctx, { ...rec, status: 'dismissed' })
+    await scan($, ctx)
 
-  return chosen.length
+    return chosen.length
+  })
 }
 
 /**
- * Startup is busy (MCP servers spawning), so a lookup that fails is tried again each heartbeat, up to LOOKUP_TRIES:
- * where it can't succeed, a PowerShell a minute for the session's whole life would cost more than it finds.
+ * Startup is busy (MCP servers spawning, or many sessions starting at once after a restore), so a lookup that fails is
+ * tried again, at heartbeats 0, 1, 3, 7 and 15, then no more: where it can't succeed, a PowerShell a minute for the
+ * session's whole life would cost more than it finds.
  */
 async function beat($: Engine, ctx: Ctx): Promise<void> {
-  if (ctx.isWindows && ctx.facts.pid === undefined && ctx.lookups < LOOKUP_TRIES) {
+  const n = ctx.beats++
+  const due = ((n + 1) & n) === 0
+  if (ctx.isWindows && ctx.facts.pid === undefined && due && ctx.lookups < LOOKUP_TRIES) {
     ctx.lookups++
     await identify($, ctx).catch(err => $.ui.log(`session-restore: identify failed: ${err}`, { to: 'debug' }))
   }
@@ -314,6 +356,8 @@ export const register: Register = (on, options) => {
     ends: 0,
     writes: Promise.resolve(),
     lookups: 0,
+    beats: 0,
+    acting: Promise.resolve(),
     titleTurns: -1,
   }
 
@@ -348,6 +392,9 @@ export const register: Register = (on, options) => {
       await save($, ctx, ctx.tracked).catch(() => undefined)
       if (e.reason === 'clear' || e.reason === 'resume') ctx.tracked = null
     }
+    // A /resume in this process starts no session.start: the picked session's record would wait a minute for the next
+    // heartbeat, and another session's band could reopen it meanwhile.
+    if (e.reason === 'resume') $.clock.after(1_000, () => void sync($, ctx).catch(() => undefined))
 
     return next(e)
   })

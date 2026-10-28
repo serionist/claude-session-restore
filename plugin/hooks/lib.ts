@@ -1,7 +1,7 @@
 import type { SessionRecord, SessionStatus } from '../types'
 
 export const HEARTBEAT_MS = 60_000
-/** Process lookups a session tries, a heartbeat apart: the first minutes, while its MCP servers start. */
+/** Process lookups a session tries, at heartbeats 0, 1, 3, 7 and 15: the minutes its MCP servers may take to start. */
 export const LOOKUP_TRIES = 5
 /** Without a process to check, a session silent this long is taken as gone. */
 export const STALE_MS = 5 * 60_000
