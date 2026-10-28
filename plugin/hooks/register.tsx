@@ -8,6 +8,7 @@ import {
   encodePowerShell,
   HEARTBEAT_MS,
   isInterrupted,
+  LOOKUP_TRIES,
   labelOf,
   launchPlan,
   launchScript,
@@ -32,6 +33,14 @@ type Ctx = {
   facts: Pick<SessionRecord, 'pid' | 'pidStarted' | 'exe' | 'flags'>
   /** This process's current session; /clear and /resume move it to a new id. */
   tracked: SessionRecord | null
+  /** How many sessions ended in this process: a sync that started before an end saves nothing. */
+  ends: number
+  /** Every record write, one after another in the order asked, so a close is never overtaken. */
+  writes: Promise<void>
+  /** Process lookups tried; past LOOKUP_TRIES the session counts as gone by its heartbeat alone. */
+  lookups: number
+  /** The turn count at which the messages were last read for a title. */
+  titleTurns: number
 }
 
 const PANE = 'interrupted-sessions'
@@ -52,8 +61,12 @@ async function setup($: Engine, ctx: Ctx): Promise<string> {
   return ctx.dir
 }
 
-async function save($: Engine, ctx: Ctx, rec: SessionRecord): Promise<void> {
-  await $.fs.write(`${await setup($, ctx)}/${rec.id}.json`, JSON.stringify(rec, null, 2))
+function save($: Engine, ctx: Ctx, rec: SessionRecord): Promise<void> {
+  const text = JSON.stringify(rec, null, 2)
+  const write = ctx.writes.then(async () => $.fs.write(`${await setup($, ctx)}/${rec.id}.json`, text))
+  ctx.writes = write.catch(() => undefined)
+
+  return write
 }
 
 function runPowerShell($: Engine, script: string) {
@@ -74,17 +87,29 @@ async function firstPrompt($: Engine): Promise<string | undefined> {
 /** Writes this session's record; a session with no prompt yet has no transcript to resume. */
 async function sync($: Engine, ctx: Ctx): Promise<void> {
   if (!ctx.isTracking) return
+  // A session that ends while this waits keeps its close: what this would save is from before it.
+  const ends = ctx.ends
   const id = await $.session.id()
   if (ctx.tracked?.id === id && ctx.tracked.status !== 'open') return
-  if ((await $.session.turns()) === 0) return
+  const turns = await $.session.turns()
+  if (turns === 0) return
 
   const now = await $.clock.now()
   if (ctx.tracked === null || ctx.tracked.id !== id) {
     // The project root, not cwd(): a shell `cd` in a tool moves cwd, and `claude --resume` finds the session only
     // from the folder it started in.
-    ctx.tracked = { id, cwd: await $.session.root(), status: 'open', startedAt: now, lastSeen: now }
+    const cwd = await $.session.root()
+    if (ctx.ends !== ends) return
+    ctx.tracked = { id, cwd, status: 'open', startedAt: now, lastSeen: now }
+    ctx.titleTurns = -1
   }
-  const title = ctx.tracked.title ?? (await firstPrompt($))
+  let title = ctx.tracked.title
+  // The messages are read for a title only after a new turn: a session opened with a slash command has none to find.
+  if (title === undefined && turns !== ctx.titleTurns) {
+    ctx.titleTurns = turns
+    title = await firstPrompt($)
+  }
+  if (ctx.ends !== ends || ctx.tracked?.id !== id) return
   ctx.tracked = { ...ctx.tracked, ...ctx.facts, title, status: 'open', lastSeen: now }
   await save($, ctx, ctx.tracked)
 }
@@ -179,24 +204,40 @@ async function launch($: Engine, ctx: Ctx, recs: readonly SessionRecord[]): Prom
   if (ran.exitCode !== 0) throw new Error(`exit ${ran.exitCode}: ${ran.stderr.trim().slice(0, 300)}`)
 }
 
+/**
+ * The sessions of ids still cut off now, and a line for those that no longer are. The band and the pane show the
+ * list as last scanned: since then another session may have restored one, or the person resumed it by hand, and
+ * reopening it would put two claude processes on one transcript.
+ */
+async function stillCutOff($: Engine, ctx: Ctx, ids: readonly string[]): Promise<[SessionRecord[], string[]]> {
+  const chosen = (await scan($, ctx)).filter(rec => ids.includes(rec.id))
+  const left = ids.length - chosen.length
+  const note =
+    left === 1
+      ? '1 session was no longer cut off, so it was left alone.'
+      : `${left} sessions were no longer cut off, so they were left alone.`
+
+  return [chosen, left > 0 ? [note] : []]
+}
+
 async function restore($: Engine, ctx: Ctx, ids: readonly string[]): Promise<string> {
-  const chosen = (await read($, interrupted)).filter(rec => ids.includes(rec.id))
-  if (chosen.length === 0) return 'No interrupted sessions to restore.'
-  if (!ctx.isWindows) return ['Run these to reopen them:', ...chosen.map(manualCommand)].join('\n')
+  const [chosen, lines] = await stillCutOff($, ctx, ids)
+  if (chosen.length === 0) return lines.length > 0 ? lines.join('\n') : 'No interrupted sessions to restore.'
+  if (!ctx.isWindows) return ['Run these to reopen them:', ...chosen.map(manualCommand), ...lines].join('\n')
 
   const ready: SessionRecord[] = []
   const gone: SessionRecord[] = []
   for (const rec of chosen) ((await $.fs.exists(rec.cwd)) ? ready : gone).push(rec)
 
-  const lines: string[] = []
   if (ready.length > 0) {
     try {
       await launch($, ctx, ready)
       for (const rec of ready) await save($, ctx, { ...rec, status: 'restored' })
-      lines.push(`Reopened ${plural(ready.length, 'session')} in Windows Terminal.`)
+      lines.unshift(`Reopened ${plural(ready.length, 'session')} in Windows Terminal.`)
       $.ui.toast(`Reopened ${plural(ready.length, 'session')}`)
     } catch (err) {
-      lines.push(`Could not open a terminal: ${err instanceof Error ? err.message : String(err)}`)
+      lines.unshift(`Could not open a terminal: ${err instanceof Error ? err.message : String(err)}`)
+      $.ui.toast('Could not reopen the sessions: see the transcript')
     }
   }
   for (const rec of gone) lines.push(`Skipped "${labelOf(rec)}": ${rec.cwd} no longer exists.`)
@@ -205,17 +246,35 @@ async function restore($: Engine, ctx: Ctx, ids: readonly string[]): Promise<str
   return lines.join('\n')
 }
 
+/** A click's result goes to the transcript, a dim line the model never sees; `/restore` returns it as its output. */
+function restoreFromClick($: Engine, ctx: Ctx, ids: readonly string[]): void {
+  void restore($, ctx, ids).then(
+    text => {
+      $.ui.log(text)
+      if (!ctx.isWindows) $.ui.toast('The commands to reopen them are in the transcript')
+    },
+    err => {
+      $.ui.log(`Could not reopen the sessions: ${err instanceof Error ? err.message : String(err)}`)
+      $.ui.toast('Could not reopen the sessions: see the transcript')
+    },
+  )
+}
+
 async function dismiss($: Engine, ctx: Ctx, ids: readonly string[]): Promise<number> {
-  const chosen = (await read($, interrupted)).filter(rec => ids.includes(rec.id))
+  const [chosen] = await stillCutOff($, ctx, ids)
   for (const rec of chosen) await save($, ctx, { ...rec, status: 'dismissed' })
   await scan($, ctx)
 
   return chosen.length
 }
 
-/** Startup is busy (MCP servers spawning), so a lookup that fails is tried again each heartbeat. */
+/**
+ * Startup is busy (MCP servers spawning), so a lookup that fails is tried again each heartbeat, up to LOOKUP_TRIES:
+ * where it can't succeed, a PowerShell a minute for the session's whole life would cost more than it finds.
+ */
 async function beat($: Engine, ctx: Ctx): Promise<void> {
-  if (ctx.isWindows && ctx.facts.pid === undefined) {
+  if (ctx.isWindows && ctx.facts.pid === undefined && ctx.lookups < LOOKUP_TRIES) {
+    ctx.lookups++
     await identify($, ctx).catch(err => $.ui.log(`session-restore: identify failed: ${err}`, { to: 'debug' }))
   }
   await sync($, ctx)
@@ -252,6 +311,10 @@ export const register: Register = (on, options) => {
     isTracking: false,
     facts: {},
     tracked: null,
+    ends: 0,
+    writes: Promise.resolve(),
+    lookups: 0,
+    titleTurns: -1,
   }
 
   on('session.start', async ($, e, next) => {
@@ -277,6 +340,7 @@ export const register: Register = (on, options) => {
   })
 
   on('session.end', async ($, e, next) => {
+    ctx.ends++
     const rec = ctx.tracked
     if (rec !== null && rec.id === e.sessionId) {
       const now = await $.clock.now()
@@ -341,7 +405,12 @@ export const register: Register = (on, options) => {
           <Text color="warning">
             {list.length === 1 ? '1 Claude session was' : `${list.length} Claude sessions were`} cut off
           </Text>
-          <Button key="restore-all" variant="primary" label="Restore all" onPress={() => void restore($, ctx, ids)} />
+          <Button
+            key="restore-all"
+            variant="primary"
+            label="Restore all"
+            onPress={() => restoreFromClick($, ctx, ids)}
+          />
           <Button key="choose" label="Choose" onPress={() => openPane($)} />
           <Button key="dismiss" role="dismiss" label="Dismiss" onPress={() => void dismiss($, ctx, ids)} />
         </Box>
@@ -365,7 +434,7 @@ export const register: Register = (on, options) => {
         {list.map(rec => (
           <Box key={`row-${rec.id}`} flexDirection="column">
             <Box gap={1}>
-              <Button key={`restore-${rec.id}`} label="Restore" onPress={() => void restore($, ctx, [rec.id])} />
+              <Button key={`restore-${rec.id}`} label="Restore" onPress={() => restoreFromClick($, ctx, [rec.id])} />
               <Text bold wrap="truncate-end">
                 {labelOf(rec)}
               </Text>
@@ -377,7 +446,12 @@ export const register: Register = (on, options) => {
           </Box>
         ))}
         <Box gap={1}>
-          <Button key="restore-all" variant="primary" label="Restore all" onPress={() => void restore($, ctx, ids)} />
+          <Button
+            key="restore-all"
+            variant="primary"
+            label="Restore all"
+            onPress={() => restoreFromClick($, ctx, ids)}
+          />
           <Button key="forget-all" label="Forget all" onPress={() => void dismiss($, ctx, ids)} />
         </Box>
       </Box>

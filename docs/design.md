@@ -35,6 +35,12 @@ A record is written from the session's first turn: before that there is no trans
 nothing. `/clear` and `/resume` end one session and start another in the same process; the old record is closed and a
 new one starts at the next turn.
 
+- **A record's last word is the close.** `sync` (each turn and heartbeat) notes how many sessions had ended in this
+  process when it started (`ctx.ends`), and saves nothing if one ended while it waited. Every write of a record goes
+  through one queue (`ctx.writes`), in the order asked, so a save asked for before the close can't land after it.
+- **The title** is the first prompt's first line, read from the messages only after a new turn (`ctx.titleTurns`): a
+  session opened with a slash command has none, and reading up to 4,096 messages a minute would find none again.
+
 ## Statuses
 
 | Status | Set when | Offered for restore |
@@ -54,7 +60,9 @@ the second, and `claude --resume` finds a session only from the folder it starte
 
 At start, and on each heartbeat until it succeeds, a PowerShell script walks up from its own process to the nearest
 `claude*` ancestor, through `Win32_Process`, and returns its pid, start time, path and command line. The lookup is
-retried because it can time out while MCP servers are still spawning. The command line becomes `flags`. Every
+retried because it can time out while MCP servers are still spawning, at most `LOOKUP_TRIES` (5) times: where it can't
+succeed (PowerShell blocked, claude running as `node.exe` from npm), the session counts as gone by its heartbeat
+alone, as off Windows. The command line becomes `flags`. Every
 PowerShell the plugin runs writes UTF-8 (`runPowerShell`): Windows PowerShell otherwise writes to a pipe in the
 console's code page, and a path like `C:\Users\Sóma` comes back garbled.
 
@@ -64,9 +72,16 @@ session looking alive once another process took its number.
 ## Offering and restoring
 
 - **The scan** reads every record, skips this session's own, and publishes the cut-off ones to `$.state`, which the
-  band and the pane read. It runs at start and after every restore or dismiss.
+  band and the pane read. It runs at start, on `/restore`, and before and after every restore or dismiss.
 - **The band** (`AbovePrompt`) shows when there are any: Restore all, Choose (the pane), Dismiss. It stays out of the
   way while Claude Code shows a survey.
+- **A click acts on the list as it is now** (`stillCutOff`): the band shows the list as last scanned, and since then
+  another session may have restored a session, or the person resumed it by hand. Restore and Dismiss scan again and
+  leave alone each session no longer cut off, saying how many.
+- **A click says what it did** (`restoreFromClick`): what Restore did goes to the transcript as a dim line the model
+  never sees, the sessions reopened, a launch's error, each folder that is gone, and off Windows the commands to run;
+  a toast says it succeeded, failed or put commands there. `/restore` returns the same text as its output. A session
+  whose folder is gone stays offered: a network or removable drive comes back, and Dismiss is one click.
 - **Restoring** writes a plan (`launchPlan`) to `<config>/session-restore/launch.json` and runs a fixed PowerShell
   script (`launchScript`) that reads it. The script first clears the session variables (`SESSION_ENV`): Windows
   Terminal gives new tabs the caller's environment, and a claude that sees them runs as a child session with no
