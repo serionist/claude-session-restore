@@ -6,6 +6,8 @@ in the same PR; `docs/releasing.md` says how a release dates it.
 
 ## Unreleased
 
+## 0.1.1 (2026-10-28)
+
 ### Fixed
 
 - The band's and the pane's Restore and Dismiss act on the sessions cut off at the moment of the click: one another

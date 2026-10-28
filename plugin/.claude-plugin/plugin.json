@@ -1,6 +1,6 @@
 {
   "name": "session-restore",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Reopens Claude Code sessions that a crash, restart or closed terminal cut off",
   "author": {
     "name": "Soma Osvay",
