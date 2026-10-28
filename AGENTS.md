@@ -20,7 +20,7 @@ crash, a restart or a closed terminal cut off. The repo is its own marketplace.
 
 | Path | What |
 |---|---|
-| `plugin/` | the plugin: `.claude-plugin/plugin.json` (name, version, the `shell` option), `hooks/` (`hooks.json`, `register.tsx`, `lib.ts`, `lib.test.ts`), `types/index.d.ts`, `tsconfig.json`, `README.md` |
+| `plugin/` | the plugin: `.claude-plugin/plugin.json` (name, version, the `shell` option), `hooks/` (`hooks.json`, `register.tsx`, `lib.ts`, and their tests `register.test.tsx`, `lib.test.ts`), `types/index.d.ts`, `tsconfig.json`, `README.md` |
 | `.claude-plugin/marketplace.json` | the marketplace: one plugin, source `./plugin` |
 | `docs/` | `design.md` (how it works), `releasing.md`; `plans/`, `reviews/`: dated records, never current truth |
 | `tools/` | `gate.ts` (the gate), `hooks.ts` (behind `.githooks/`), `setup.ts` (once per clone; `link` for skills), `gate.test.ts`, `launcher.test.ts` (the restore scripts in real PowerShell, on Windows); Node's standard library only |

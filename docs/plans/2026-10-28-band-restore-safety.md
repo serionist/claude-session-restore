@@ -1,9 +1,9 @@
 ---
 title: Restore only what is still cut off, say what happened, and keep each record's last word
 issue: "#1, #2, #3, #4"
-status: draft
-approved_by:
-approved_at:
+status: approved
+approved_by: serionist
+approved_at: 2026-10-28
 ---
 
 # Restore only what is still cut off, say what happened, and keep each record's last word
@@ -38,8 +38,11 @@ click's scan still lists it.
   `restore` says: "1 session was no longer cut off, so it was left alone." `/restore` already scans first; its
   indexes stay those of the list it showed. Restores and dismisses in one process run one at a time (`ctx.acting`),
   so a second click while a launch runs scans after the first marked its sessions `restored` (P4). A `/resume`
-  inside a session starts no `session.start`: `session.end` with reason `resume` schedules a `sync` a second later
-  (`$.clock.after`), so the picked session's record is `open` before another band can reopen it (P3).
+  inside a session starts no `session.start`: the settings hook event `SessionStart` with source `resume`
+  (`classic.SessionStart`) fires once the picked session is in place, and starts a `sync`, so its record is `open`
+  before another band can reopen it (P3; code review round 1 moved it there from a timer on `session.end`). Any
+  other end (`/exit`, a signal, logout) ends the process: tracking stops there, so a heartbeat before the exit writes
+  nothing.
 - **#1, every click says what it did.** The band's and the pane's Restore buttons log what `restore()` returns to the
   transcript (`$.ui.log`, a dim line the model never sees; one call per line, since the terminal draws a line's first
   2,000 characters, P2): "Reopened N sessions", whatever opened them, a launch's error, each folder that is gone,
@@ -81,7 +84,8 @@ after a click, and fewer background PowerShells.
    Tests in `register.test.tsx`: a `sync` held on its messages while `session.end` closes the record ends with the
    record closed; a close while the first save is still written lands last; `/clear`, back to the first session by
    `/resume`, then a signal leaves it `interrupted` (P1); after a `/resume` the picked session's record is `open`
-   within a second (P3); thirty minutes with the lookup failing start five lookups; a session whose only prompt is a
+   once `SessionStart` says it is in place (P3); after `/exit` a heartbeat writes nothing; thirty minutes with the
+   lookup failing start five lookups, at minutes 0, 1, 3, 7 and 15; a session whose only prompt is a
    slash command reads the messages once until a new turn.
 2. **#2 and #1** in `register.tsx`: `restore` and `dismiss` scan first and run one at a time; the buttons log and
    toast. Tests: the band's Restore all after another session restored one of two sessions launches only the other
@@ -111,9 +115,9 @@ macOS and Linux, which the kit's tests cover.
 | # | Risk | Status |
 |---|---|---|
 | R1 | The extra scan at a click costs a PowerShell when an open record exists | Accepted: one per click |
-| R2 | A session resumed by hand writes its record only at its first `sync`; a click in that second still reopens it | Accepted: `claude --resume` syncs at its start, and an in-session `/resume` within a second (P3); before this change the same click reopened it at any time |
+| R2 | A session resumed by hand writes its record only at its first `sync`; a click in that moment still reopens it | Accepted: `claude --resume` syncs at its start, and an in-session `/resume` at its `SessionStart` (P3); before this change the same click reopened it at any time |
 | R3 | A test kit difference between Claude Code versions in how the band is mounted | The tests run on the pinned Claude Code in CI, and the types are checked locally |
-| R4 | The kit runs one `fs.write` at a time, so no test fails without the write queue | Accepted: the queue is a few lines, and orders writes where an engine runs them at once |
+| R4 | No test failed without the write queue | Resolved (P8): the kit runs writes at once; the test released the held write too early, and now asks for the close first |
 
 ## Plan review
 
@@ -127,7 +131,7 @@ macOS and Linux, which the kit's tests cover.
 |---|---|---|---|
 | P1 | major | `ended` never forgets an id: after `/clear` (or `/resume` away) and `/resume` back to the same id in the process, every `sync` leaves it alone; its record stays `closed`, and a crash after is never offered | fixed: a count of ends, not a set of ids; a test for the round trip |
 | P2 | minor | Off Windows, many sessions' commands in one `$.ui.log` line are cut at 2,000 characters | fixed: one line per call |
-| P3 | minor | An in-session `/resume` writes the picked session's record only at the next heartbeat, so for up to a minute another band reopens it | fixed: a `sync` a second after `session.end` with reason `resume`; a test |
+| P3 | minor | An in-session `/resume` writes the picked session's record only at the next heartbeat, so for up to a minute another band reopens it | fixed: a `sync` a second after `session.end` with reason `resume`, then (code review round 1) at `SessionStart` with source `resume`; a test |
 | P4 | minor | Two clicks in one session within a launch's seconds open each session twice | fixed: restores and dismisses run one at a time; a test |
 | P5 | minor | The plan said nothing of a failed write; a plain chain would skip every later write | fixed: each write runs once the one before settled; its caller sees its own failure |
 | P6 | minor | The title test passed on the old code; nothing failed without the queue; Dismiss and the resumed-by-hand case went untested; the by-hand line covered #2 only | fixed: a slash-command session for the title, Dismiss and resumed-by-hand tests, the by-hand line extended; the queue: no kit test can fail without it (R4) |
@@ -146,3 +150,18 @@ Improvements:
 - "in Windows Terminal" when consoles opened: taken, "Reopened N sessions".
 - The `restored` saves inside the launch's try: taken, apart.
 - Sessions resumed where they are not tracked: taken, under Out of scope.
+
+### Round 2
+
+- **How:** one fresh reviewer, on 2026-10-28, against `29efca7`, reading the edits and round 1's findings, in the same
+  pass as the code's first review, mutating the code to see which tests catch each fix.
+- **Verdict:** approved; one new minor.
+- **Now:** applied.
+
+P1, P3, P4, P5 and P7 confirmed, each by a test that fails without it; P6 confirmed but for the queue (P8).
+
+| # | Sev | Finding | Status |
+|---|---|---|---|
+| P8 | minor | R4 was wrong: the kit runs writes at once; the queue's test released the held write before the close was asked for | fixed: the test asks for the close first, and fails without the queue |
+
+**Approved** by the maintainer's "do all" for #1 to #4, 2026-10-28.

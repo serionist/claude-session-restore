@@ -32,6 +32,8 @@ function world(on: On, options: WorldOptions = {}) {
   const ran: string[][] = []
   const logs: string[] = []
   const toasts: string[] = []
+  /** When each process lookup ran, by the mocked clock. */
+  const lookupsAt: number[] = []
   const session = {
     id: 'own-session',
     turns: 1,
@@ -48,6 +50,7 @@ function world(on: On, options: WorldOptions = {}) {
   on('command.register', () => ({ value: { command: 'restore' } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.end', (_, e) => ({ sessionId: e.sessionId }))
+  on('classic.SessionStart', () => ({}))
   on('session.id', () => ({ value: session.id }))
   on('session.turns', () => ({ value: session.turns }))
   on('session.root', () => ({ value: 'D:\\work\\app' }))
@@ -73,6 +76,7 @@ function world(on: On, options: WorldOptions = {}) {
   on('process.run', (_, e) => {
     ran.push([...e.argv])
     const script = scriptOf(e.argv)
+    if (script.includes('ProcessId=$PID')) lookupsAt.push(clock.now())
     const fails = options.launchFails !== undefined && script.includes('Start-Process')
     const stdout = script.includes("Name like 'claude%'") ? session.alive : ''
     const done = { stdout, isStdoutTruncated: false, isStderrTruncated: false }
@@ -88,7 +92,7 @@ function world(on: On, options: WorldOptions = {}) {
     return { value: undefined }
   })
 
-  return { files, written, ran, logs, toasts, session, clock }
+  return { files, written, ran, logs, toasts, session, clock, lookupsAt }
 }
 
 /** The script a `powershell -EncodedCommand` call runs. */
@@ -173,15 +177,31 @@ describe('the record', () => {
     await $.session.start(START)
     await clock.settle()
 
-    // The first save, `open`, is still being written when the person leaves.
+    // The first save, `open`, is still being written when the person leaves; the close is asked for before it lands.
     const ending = $.session.end({ reason: 'prompt_input_exit', sessionId: 'own-session' } as Parameters<
       typeof $.session.end
     >[0])
+    await clock.settle()
     release()
     await ending
     await clock.settle()
 
     expect(written.filter(one => one.path.endsWith(`${SESSIONS}/own-session.json`)).length).toBe(2)
+    expect(lastWrite(written, 'own-session').status).toBe('closed')
+  })
+
+  test('after /exit, a heartbeat before the process ends writes nothing', async ($, on) => {
+    const { written, clock } = world(on, { windows: false })
+    await $.session.start(START)
+    await clock.settle()
+    await $.session.end({ reason: 'prompt_input_exit', sessionId: 'own-session' } as Parameters<
+      typeof $.session.end
+    >[0])
+    const writes = written.length
+
+    await clock.advance(2 * MINUTE)
+
+    expect(written.length).toBe(writes)
     expect(lastWrite(written, 'own-session').status).toBe('closed')
   })
 
@@ -196,7 +216,8 @@ describe('the record', () => {
     await clock.advance(MINUTE)
     await $.session.end({ reason: 'resume', sessionId: 'second' } as End)
     session.id = 'own-session'
-    await clock.advance(1_000)
+    await $.classic.SessionStart({ source: 'resume' })
+    await clock.settle()
     await $.session.end({ reason: 'other', sessionId: 'own-session' } as End)
     await clock.settle()
 
@@ -204,14 +225,15 @@ describe('the record', () => {
     expect(lastWrite(written, 'own-session').status).toBe('interrupted')
   })
 
-  test("after a /resume in this process, the picked session's record is written within a second", async ($, on) => {
+  test("after a /resume in this process, the picked session's record is written as soon as it is in place", async ($, on) => {
     const { written, session, clock } = world(on, { windows: false })
     await $.session.start(START)
     await clock.settle()
 
     await $.session.end({ reason: 'resume', sessionId: 'own-session' } as Parameters<typeof $.session.end>[0])
     session.id = 'picked'
-    await clock.advance(1_000)
+    await $.classic.SessionStart({ source: 'resume' })
+    await clock.settle()
 
     expect(lastWrite(written, 'picked').status).toBe('open')
   })
@@ -228,14 +250,13 @@ describe('the record', () => {
     expect(session.messageReads).toBe(2)
   })
 
-  test('a process lookup that keeps failing is tried LOOKUP_TRIES times, not every minute (#4)', async ($, on) => {
-    const { ran, clock } = world(on)
+  test('a process lookup that keeps failing is tried at minutes 0, 1, 3, 7 and 15, then no more (#4)', async ($, on) => {
+    const { lookupsAt, clock } = world(on)
     await $.session.start(START)
     await clock.settle()
     await clock.advance(30 * MINUTE)
 
-    const lookups = ran.filter(argv => scriptOf(argv).includes('ProcessId=$PID'))
-    expect(lookups.length).toBe(5)
+    expect(lookupsAt.map(at => (at - NOW) / MINUTE)).toEqual([0, 1, 3, 7, 15])
   })
 })
 
@@ -331,6 +352,34 @@ describe('restoring', () => {
       '1 session was no longer cut off, so it was left alone.',
       'Reopened 1 session.',
     ])
+  })
+
+  test('/restore 1,1 names one session twice, and reopens it once without saying any was left alone', async ($, on) => {
+    const { ran, clock } = world(on, { files: { 'cut-1.json': record('cut-1') } })
+    await $.session.start(START)
+    await clock.settle()
+
+    const run = { command: 'restore', args: '1,1' } as Parameters<typeof $.command.run>[0]
+    const { text } = await $.command.run(run)
+
+    expect(text).toBe('Reopened 1 session.')
+    expect(ran.filter(argv => scriptOf(argv).includes('Start-Process')).length).toBe(1)
+  })
+
+  test('off Windows, a click with no commands to run says so without a toast about commands', async ($, on) => {
+    const { files, logs, toasts, clock } = world(on, { windows: false, files: { 'cut-1.json': record('cut-1') } })
+    await $.session.start(START)
+    await clock.settle()
+    // The person resumed cut-1 by hand: its record is open and fresh, so it is no longer cut off.
+    files['cut-1.json'] = record('cut-1', { status: 'open', lastSeen: NOW })
+
+    const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+    await band.press({ key: 'restore-all' })
+    await clock.settle()
+
+    expect(logs.at(-1)).toBe('1 session was no longer cut off, so it was left alone.')
+    expect(toasts.includes('The commands to reopen them are in the transcript')).toBe(false)
+    await band.unmount()
   })
 
   test("off Windows, the band's Restore all puts the commands in the transcript and marks nothing (#1)", async ($, on) => {

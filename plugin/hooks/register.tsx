@@ -102,9 +102,7 @@ async function sync($: Engine, ctx: Ctx): Promise<void> {
   if (ctx.tracked === null || ctx.tracked.id !== id) {
     // The project root, not cwd(): a shell `cd` in a tool moves cwd, and `claude --resume` finds the session only
     // from the folder it started in.
-    const cwd = await $.session.root()
-    if (ctx.ends !== ends) return
-    ctx.tracked = { id, cwd, status: 'open', startedAt: now, lastSeen: now }
+    ctx.tracked = { id, cwd: await $.session.root(), status: 'open', startedAt: now, lastSeen: now }
     ctx.titleTurns = -1
   }
   let title = ctx.tracked.title
@@ -113,7 +111,7 @@ async function sync($: Engine, ctx: Ctx): Promise<void> {
     ctx.titleTurns = turns
     title = await firstPrompt($)
   }
-  if (ctx.ends !== ends || ctx.tracked?.id !== id) return
+  if (ctx.ends !== ends || ctx.tracked?.id !== id || ctx.tracked.status !== 'open') return
   ctx.tracked = { ...ctx.tracked, ...ctx.facts, title, status: 'open', lastSeen: now }
   await save($, ctx, ctx.tracked)
 }
@@ -214,8 +212,10 @@ async function launch($: Engine, ctx: Ctx, recs: readonly SessionRecord[]): Prom
  * reopening it would put two claude processes on one transcript.
  */
 async function stillCutOff($: Engine, ctx: Ctx, ids: readonly string[]): Promise<[SessionRecord[], string[]]> {
-  const chosen = (await scan($, ctx)).filter(rec => ids.includes(rec.id))
-  const left = ids.length - chosen.length
+  // A set: `/restore 1,1`, or a number and its id's prefix, names one session twice.
+  const wanted = new Set(ids)
+  const chosen = (await scan($, ctx)).filter(rec => wanted.has(rec.id))
+  const left = wanted.size - chosen.length
   const note =
     left === 1
       ? '1 session was no longer cut off, so it was left alone.'
@@ -242,11 +242,18 @@ function errorText(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
 
-function restore($: Engine, ctx: Ctx, ids: readonly string[]): Promise<string> {
+/** What a restore did, as lines to show, and whether they hold commands for the person to run. */
+type Restored = { text: string; commands: boolean }
+
+function restore($: Engine, ctx: Ctx, ids: readonly string[]): Promise<Restored> {
   return oneAtATime(ctx, async () => {
     const [chosen, lines] = await stillCutOff($, ctx, ids)
-    if (chosen.length === 0) return lines.length > 0 ? lines.join('\n') : 'No interrupted sessions to restore.'
-    if (!ctx.isWindows) return ['Run these to reopen them:', ...chosen.map(manualCommand), ...lines].join('\n')
+    if (chosen.length === 0) {
+      return { text: lines.length > 0 ? lines.join('\n') : 'No interrupted sessions to restore.', commands: false }
+    }
+    if (!ctx.isWindows) {
+      return { text: ['Run these to reopen them:', ...chosen.map(manualCommand), ...lines].join('\n'), commands: true }
+    }
 
     const ready: SessionRecord[] = []
     const gone: SessionRecord[] = []
@@ -274,9 +281,10 @@ function restore($: Engine, ctx: Ctx, ids: readonly string[]): Promise<string> {
       }
     }
     for (const rec of gone) lines.push(`Skipped "${labelOf(rec)}": ${rec.cwd} no longer exists.`)
-    await scan($, ctx)
+    // The list redrawn; a scan that fails now must not turn a good launch into a failure.
+    await scan($, ctx).catch(() => undefined)
 
-    return lines.join('\n')
+    return { text: lines.join('\n'), commands: false }
   })
 }
 
@@ -286,9 +294,9 @@ function restore($: Engine, ctx: Ctx, ids: readonly string[]): Promise<string> {
  */
 function restoreFromClick($: Engine, ctx: Ctx, ids: readonly string[]): void {
   void restore($, ctx, ids).then(
-    text => {
+    ({ text, commands }) => {
       for (const line of text.split('\n')) $.ui.log(line)
-      if (!ctx.isWindows) $.ui.toast('The commands to reopen them are in the transcript')
+      if (commands) $.ui.toast('The commands to reopen them are in the transcript')
     },
     err => {
       $.ui.log(`Could not reopen the sessions: ${errorText(err)}`)
@@ -304,6 +312,14 @@ function dismiss($: Engine, ctx: Ctx, ids: readonly string[]): Promise<number> {
     await scan($, ctx)
 
     return chosen.length
+  })
+}
+
+/** Dismiss and Forget all from a click: a write that fails says so, rather than leaving the band as it was. */
+function dismissFromClick($: Engine, ctx: Ctx, ids: readonly string[]): void {
+  void dismiss($, ctx, ids).catch(err => {
+    $.ui.log(`Could not dismiss the sessions: ${errorText(err)}`)
+    $.ui.toast('Could not dismiss the sessions: see the transcript')
   })
 }
 
@@ -392,11 +408,19 @@ export const register: Register = (on, options) => {
       await save($, ctx, ctx.tracked).catch(() => undefined)
       if (e.reason === 'clear' || e.reason === 'resume') ctx.tracked = null
     }
-    // A /resume in this process starts no session.start: the picked session's record would wait a minute for the next
-    // heartbeat, and another session's band could reopen it meanwhile.
-    if (e.reason === 'resume') $.clock.after(1_000, () => void sync($, ctx).catch(() => undefined))
+    // Any other end ends the process: a heartbeat before it exits must not write a record for a session now gone.
+    if (e.reason !== 'clear' && e.reason !== 'resume') ctx.isTracking = false
 
     return next(e)
+  })
+
+  // A /resume in this process starts no session.start, so the picked session's record would wait a minute for the next
+  // heartbeat, while another session's band could reopen it. The settings hook event fires once it is in place.
+  on('classic.SessionStart', async ($, e, next) => {
+    const done = await next(e)
+    if (e.source === 'resume') void sync($, ctx).catch(() => undefined)
+
+    return done
   })
 
   on('command.run', { command: 'restore' }, async ($, e) => {
@@ -404,23 +428,9 @@ export const register: Register = (on, options) => {
     const now = await $.clock.now()
     const arg = e.args.trim().toLowerCase()
     if (list.length === 0) return { text: 'No interrupted sessions.' }
-    if (arg === 'all')
-      return {
-        text: await restore(
-          $,
-          ctx,
-          list.map(rec => rec.id),
-        ),
-      }
-    if (arg === 'forget') {
-      const count = await dismiss(
-        $,
-        ctx,
-        list.map(rec => rec.id),
-      )
-
-      return { text: `Forgot ${plural(count, 'interrupted session')}.` }
-    }
+    const all = list.map(rec => rec.id)
+    if (arg === 'all') return { text: (await restore($, ctx, all)).text }
+    if (arg === 'forget') return { text: `Forgot ${plural(await dismiss($, ctx, all), 'interrupted session')}.` }
     if (arg !== '') {
       const ids = arg
         .split(/[\s,]+/)
@@ -429,7 +439,7 @@ export const register: Register = (on, options) => {
       if (ids.some(id => id === undefined))
         return { text: `No interrupted session matches "${arg}".\n\n${listing(list, now)}` }
 
-      return { text: await restore($, ctx, ids as string[]) }
+      return { text: (await restore($, ctx, ids as string[])).text }
     }
 
     openPane($)
@@ -459,7 +469,7 @@ export const register: Register = (on, options) => {
             onPress={() => restoreFromClick($, ctx, ids)}
           />
           <Button key="choose" label="Choose" onPress={() => openPane($)} />
-          <Button key="dismiss" role="dismiss" label="Dismiss" onPress={() => void dismiss($, ctx, ids)} />
+          <Button key="dismiss" role="dismiss" label="Dismiss" onPress={() => dismissFromClick($, ctx, ids)} />
         </Box>
         <Text dimColor wrap="truncate-end">
           {names}
@@ -499,7 +509,7 @@ export const register: Register = (on, options) => {
             label="Restore all"
             onPress={() => restoreFromClick($, ctx, ids)}
           />
-          <Button key="forget-all" label="Forget all" onPress={() => void dismiss($, ctx, ids)} />
+          <Button key="forget-all" label="Forget all" onPress={() => dismissFromClick($, ctx, ids)} />
         </Box>
       </Box>
     )

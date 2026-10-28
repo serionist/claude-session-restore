@@ -15,7 +15,7 @@ in the same PR; `docs/releasing.md` says how a release dates it.
 - A session you leave stays closed: a heartbeat that started just before `/exit` or `/clear` no longer saves it open
   again, which offered it for restore once its process ended (#3).
 - Two clicks on Restore within a launch's seconds open each session once, and a session picked with `/resume` inside
-  another is tracked within a second, before another band could reopen it.
+  another is tracked as soon as it is in place, before another band could reopen it.
 - Less work in the background: on Windows the claude process is looked for at most 5 times, over a session's first
   15 minutes, and the messages are read for a title only after a new turn (#4).
 

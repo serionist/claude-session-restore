@@ -7,7 +7,8 @@ are in [AGENTS.md](../AGENTS.md).
 
 | File | What |
 |---|---|
-| `plugin/hooks/register.tsx` | the hooks: `session.start`, `turn.complete`, `session.end`, the `/restore` command, the band above the prompt and the pane; everything that calls `$` |
+| `plugin/hooks/register.tsx` | the hooks: `session.start`, `turn.complete`, `session.end`, `classic.SessionStart`, the `/restore` command, the band above the prompt and the pane; everything that calls `$` |
+| `plugin/hooks/register.test.tsx` | the hooks through the engine's test kit: the record's life, the band's clicks, the restores, the clock mocked |
 | `plugin/hooks/lib.ts` | the pure logic, tested without the engine: which sessions count as cut off, the launch flags kept, every command line |
 | `plugin/types/index.d.ts` | `SessionRecord`, `SessionStatus`, and the plugin's one `$.state` value, `session-restore.interrupted` |
 | `plugin/hooks/lib.test.ts` | the tests, run by `claude plugin test plugin` in the engine's sandbox |
@@ -38,9 +39,12 @@ new one starts at the next turn.
 - **A record's last word is the close.** `sync` (each turn and heartbeat) notes how many sessions had ended in this
   process when it started (`ctx.ends`), and saves nothing if one ended while it waited. Every write of a record goes
   through one queue (`ctx.writes`), in the order asked, so a save asked for before the close can't land after it.
+  An end other than `/clear` or `/resume` ends the process, and tracking stops there: a heartbeat before the exit
+  writes nothing.
 - **A session `/resume` brings back** in the same process, even one `/clear` left, is tracked again from its next
-  `sync`. A `/resume` starts no `session.start`, so `session.end` with reason `resume` schedules a `sync` a second
-  later: the picked session's record is `open` before another session's band could reopen it.
+  `sync`. A `/resume` starts no `session.start`; the settings hook event `SessionStart` with source `resume`
+  (`classic.SessionStart`) fires once the picked session is in place, and starts a `sync`: its record is `open`
+  before another session's band could reopen it.
 - **The title** is the first prompt's first line, read from the messages only after a new turn (`ctx.titleTurns`): a
   session opened with a slash command has none, and reading up to 4,096 messages a minute would find none again.
 
@@ -61,7 +65,7 @@ the second, and `claude --resume` finds a session only from the folder it starte
 
 ## Finding the claude process (Windows)
 
-At start, and on each heartbeat until it succeeds, a PowerShell script walks up from its own process to the nearest
+At start, and at later heartbeats until it succeeds, a PowerShell script walks up from its own process to the nearest
 `claude*` ancestor, through `Win32_Process`, and returns its pid, start time, path and command line. The lookup is
 retried because it can time out while MCP servers are still spawning, at most `LOOKUP_TRIES` (5) times, at heartbeats
 0, 1, 3, 7 and 15, which covers a slow start after a restore opened many sessions at once: where it can't
