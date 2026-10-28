@@ -1,0 +1,42 @@
+# A GitHub release for each `vX.Y.Z` tag (docs/releasing.md). The plugin itself reaches users from main when the
+# release PR merges; the tag and the release record it. The tag must be on main and equal plugin.json's version, and
+# the CHANGELOG must have its dated section, whose text becomes the release notes.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      # Creates the release.
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The check that the tag is on main reads main's history.
+          fetch-depth: 0
+          persist-credentials: false
+      - name: The tag is on main, equals plugin.json's version, and has its CHANGELOG section
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "$TAG is not on main"; exit 1; }
+          version="${TAG#v}"
+          have="$(node -p 'require("./plugin/.claude-plugin/plugin.json").version')"
+          [ "$have" = "$version" ] || { echo "plugin.json says $have, the tag $TAG"; exit 1; }
+          awk -v head="## $version (" 'index($0, head) == 1 { found = 1; next } /^## / && found { exit } found' \
+            CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+          grep -q '[^[:space:]]' "$RUNNER_TEMP/notes.md" || { echo "CHANGELOG.md has no '## $version (' section"; exit 1; }
+      - name: The GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" --verify-tag --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md"

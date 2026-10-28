@@ -1,0 +1,38 @@
+# Dependabot version updates, weekly: the dev tools in package-lock.json (Claude Code, Biome, TypeScript, Node's
+# types) and the actions the workflows pin by SHA. Each group is a PR like any other: CI must pass and the maintainer
+# merges it. Security updates come as soon as an advisory is published, whatever the schedule; the cooldowns hold
+# version updates only.
+version: 2
+
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    # Wait a week after a version is published, so a broken or compromised release is pulled first.
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    groups:
+      npm:
+        patterns: ["*"]
+    ignore:
+      # Node's types follow the Node in .nvmrc, not the newest Node.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+      # TypeScript 7 is a new compiler; moving to it is a change of its own.
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    groups:
+      actions:
+        patterns: ["*"]

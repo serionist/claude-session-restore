@@ -1,0 +1,21 @@
+{
+  "name": "claude-session-restore",
+  "private": true,
+  "description": "The development tools for the session-restore Claude Code plugin. The plugin itself is plugin/.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "claude": "node node_modules/@anthropic-ai/claude-code/cli-wrapper.cjs",
+    "gate": "node tools/gate.ts",
+    "setup": "node tools/setup.ts"
+  },
+  "devDependencies": {
+    "@anthropic-ai/claude-code": "2.1.305",
+    "@biomejs/biome": "2.6.2",
+    "@types/node": "24.19.2",
+    "typescript": "6.0.3"
+  }
+}

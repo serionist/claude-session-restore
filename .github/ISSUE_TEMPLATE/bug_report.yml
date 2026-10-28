@@ -1,0 +1,59 @@
+name: Bug report
+description: Something session-restore does wrong.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Session records hold your folders and the first line of each prompt. Never paste a real one here: describe it, or invent an example. A security vulnerability goes through a [private report](https://github.com/serionist/claude-session-restore/security/advisories/new).
+  - type: dropdown
+    id: area
+    attributes:
+      label: Where
+      multiple: true
+      options:
+        [
+          "A session not offered",
+          "A session offered that should not be",
+          "Restoring",
+          "The band or the pane",
+          "/restore",
+          "Another system (macOS, Linux)",
+          "Other",
+        ]
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Plugin and Claude Code versions
+      placeholder: "session-restore 0.1.0, Claude Code 2.1.312 (claude --version)"
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: System, terminal and the shell option
+      placeholder: Windows 11 24H2, Windows Terminal 1.23, shell = powershell
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, and what the plugin did. `claude --debug` writes a line for each hook that failed; include it, with any private text removed.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before you submit
+      options:
+        - label: Nothing above holds a real prompt, a folder name I shouldn't share, or a key, token or password.
+          required: true

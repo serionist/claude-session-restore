@@ -1,0 +1,97 @@
+# The gate on every pull request and every push to main. Linux runs `gate full`: the pins, Biome, the tools' types,
+# the plugin and the marketplace validated by the pinned Claude Code, the version's CHANGELOG section, the harness,
+# commit messages and gitleaks (the PR's commits, or the whole history on main), then the plugin's tests in Claude
+# Code's own sandbox and the tools' tests. The plugin's own types need the API types a Claude session writes when it
+# loads the mod, so they are checked on the developer's machine, not here (AGENTS.md, Build and test). Windows and
+# macOS run both test suites: the tools call git and the shell, and on Windows tools/launcher.test.ts runs the
+# restore launcher's scripts in Windows PowerShell and PowerShell 7. `CI` is the one check the merge rule names.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  # Superseded PR runs are cancelled; each commit pushed to main keeps its own run and result.
+  group: ci-${{ github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  gate:
+    name: Gate (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GATE_REQUIRE_GITLEAKS: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The commit-message and secret checks read the branch's history.
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Install gitleaks
+        run: |
+          curl -sSfL -o /tmp/gitleaks.tgz \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  /tmp/gitleaks.tgz" | sha256sum -c -
+          sudo tar -xzf /tmp/gitleaks.tgz -C /usr/local/bin gitleaks
+      - name: Install
+        run: npm ci
+      - name: The full gate
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          if [ "$EVENT" = pull_request ]; then
+            node tools/gate.ts full --base "origin/$BASE_REF"
+          else
+            node tools/gate.ts full --all
+          fi
+
+  tests:
+    name: Tests (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, name: Windows }
+          - { os: macos-latest, name: macOS }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Install
+        run: npm ci
+      - name: The plugin's tests
+        run: npm run claude -- plugin test plugin
+      - name: The tools' tests, with the launcher in real PowerShell on Windows
+        run: node --test "tools/*.test.ts"
+
+  # The check the merge rule names: the gate and every system's tests passed. A job skipped by `if:` counts as a
+  # success to GitHub, so this one reads the results itself.
+  ci:
+    name: CI
+    needs: [gate, tests]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: The gate and the tests passed
+        env:
+          GATE: ${{ needs.gate.result }}
+          TESTS: ${{ needs.tests.result }}
+        run: test "$GATE" = success && test "$TESTS" = success

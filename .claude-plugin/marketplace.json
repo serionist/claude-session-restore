@@ -1,0 +1,17 @@
+{
+  "name": "session-restore",
+  "owner": {
+    "name": "Soma Osvay",
+    "url": "https://github.com/serionist"
+  },
+  "metadata": {
+    "description": "The session-restore plugin for Claude Code."
+  },
+  "plugins": [
+    {
+      "name": "session-restore",
+      "source": "./plugin",
+      "description": "Reopens Claude Code sessions that a crash, restart or closed terminal cut off"
+    }
+  ]
+}

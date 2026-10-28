@@ -1,0 +1,33 @@
+# Secrets: path-independent globs, never anchored paths.
+.env
+.env.*
+!.env.example
+*.secrets
+**/secrets/*
+*.key
+*.pem
+*.pfx
+*.p12
+
+# The dev tools npm ci installs.
+node_modules/
+
+# The API types Claude Code writes beside the mod when it loads it; written again by each Claude Code version.
+plugin/.claude-plugin/types/
+
+# Claude Code local state: machine-specific settings and keys.
+.claude/settings.local.json
+.claude/worktrees/
+CLAUDE.local.md
+
+# Scratch files the skills write: review packs, issue and PR bodies.
+.local/
+
+# Editors and OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+*.log

@@ -1,0 +1,15 @@
+# LF in the repository and in every checkout, so a file is the same bytes on Windows, Linux and macOS.
+* text=auto eol=lf
+
+# Windows scripts keep CRLF, which cmd and older PowerShell need.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary files are never touched.
+*.png binary
+*.jpg binary
+*.gif binary
+
+# npm writes the lock; a PR folds it.
+package-lock.json linguist-generated

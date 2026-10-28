@@ -1,0 +1,9 @@
+#!/bin/sh
+# Refuses tool attribution in the message (AGENTS.md, Commits and PRs). Turned on by `node tools/setup.ts`.
+cd "$(git rev-parse --show-toplevel)" || exit 1
+if ! command -v node >/dev/null 2>&1; then
+  echo "commit-msg: node not found, hook skipped; gate quick still checks the branch's messages" >&2
+  exit 0
+fi
+[ -f tools/hooks.ts ] || exit 0
+exec node tools/hooks.ts commit-msg "$@"

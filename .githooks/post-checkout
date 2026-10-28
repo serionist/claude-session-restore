@@ -1,0 +1,13 @@
+#!/bin/sh
+# After a branch switch, names the AI setup files that changed, so an agent re-reads them. Turned on by
+# `node tools/setup.ts`. Only informs: always exits 0, since git makes its exit status the switch's.
+# A file checkout ($3 is 0), the same commit and a new worktree (old is the null id) skip it before node starts.
+[ "$3" = 1 ] && [ "$1" != "$2" ] || exit 0
+case "$1" in *[!0]*) ;; *) exit 0 ;; esac
+cd "$(git rev-parse --show-toplevel)" || exit 0
+if ! command -v node >/dev/null 2>&1; then
+  echo "post-checkout: node not found, hook skipped" >&2
+  exit 0
+fi
+[ -f tools/hooks.ts ] && node tools/hooks.ts post-checkout "$@"
+exit 0

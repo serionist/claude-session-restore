@@ -1,0 +1,23 @@
+{
+  "name": "session-restore",
+  "version": "0.1.0",
+  "description": "Reopens Claude Code sessions that a crash, restart or closed terminal cut off",
+  "author": {
+    "name": "Soma Osvay",
+    "url": "https://github.com/serionist"
+  },
+  "homepage": "https://github.com/serionist/claude-session-restore",
+  "repository": "https://github.com/serionist/claude-session-restore",
+  "license": "MIT",
+  "keywords": ["sessions", "restore", "resume", "windows-terminal", "crash"],
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "shell": {
+      "type": "string",
+      "title": "Shell for restored tabs",
+      "description": "What each restored tab leaves you in when claude exits. none closes the tab with claude.",
+      "default": "powershell",
+      "options": ["powershell", "pwsh", "cmd", "none"]
+    }
+  }
+}
