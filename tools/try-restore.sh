@@ -47,8 +47,8 @@ The folder is ready:
 2. In a terminal, start a session in the folder with this clone's plugin, and send it one prompt:
      cd $(q "$folder") && claude --plugin-dir $(q "$clone/plugin")
 3. Cut it off: close that terminal window (not /exit, which counts as leaving on purpose).
-4. In another terminal, start a session anywhere with the same plugin:
-     claude --plugin-dir $(q "$clone/plugin")
+4. In another terminal, start a session in the test's own folder, with the same plugin:
+     cd $(q "$base") && claude --plugin-dir $(q "$clone/plugin")
    Press Restore all on the band (or type /restore all).
 5. A new window should open in the folder, the first session's conversation in it. Leave it open over 30 seconds.
 6. Back here: tools/try-restore.sh check
@@ -73,7 +73,13 @@ EOF
     id=$(basename "$rec" .json)
     script="$config/session-restore/launch/$id.sh"
     if [ -f "$script" ]; then echo "ok: the window ran $script"; else echo "note: no script at $script (printed commands?)"; fi
-    pwned=$(find "$base" "$HOME" -maxdepth 3 -name session-restore-pwned 2>/dev/null | head -1)
+    # Where a command in the name would have run: the restored window (the folder, or $HOME where Terminal starts),
+    # the restoring session (step 4 starts it in $base), a tmux or job server (/tmp). Never deeper into $HOME, whose
+    # Desktop and Documents macOS guards with a prompt.
+    pwned=$(find "$base" -name session-restore-pwned 2>/dev/null | head -1)
+    for f in "$HOME/session-restore-pwned" "/tmp/session-restore-pwned"; do
+      if [ -z "$pwned" ] && [ -e "$f" ]; then pwned=$f; fi
+    done
     if [ -n "$pwned" ]; then
       echo "FAIL: $pwned exists: part of the folder's name ran as a command"
       status=1

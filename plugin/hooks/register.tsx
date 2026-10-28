@@ -22,6 +22,7 @@ import {
   parseLookup,
   pickResumeFlags,
   psString,
+  RUNNABLE,
   returnsAtOnce,
   sessionScript,
   splitCommandLine,
@@ -97,9 +98,17 @@ function home(dir: string): string {
   return dir.replace(/\/sessions$/, '')
 }
 
-/** A fixed script run by /bin/sh, its arguments as "$1" and on: data, never text the shell reads. */
+/**
+ * A fixed script run by /bin/sh, its arguments as "$1" and on: data, never text the shell reads. It runs in `/`, so
+ * a session whose folder was deleted can still look things up.
+ */
 function runSh($: Engine, script: string, args: readonly string[] = [], timeoutMs = 30_000) {
-  return $.process.run(['/bin/sh', '-c', script, 'sh', ...args], { timeoutMs })
+  return $.process.run(['/bin/sh', '-c', script, 'sh', ...args], { cwd: '/', timeoutMs })
+}
+
+/** macOS or Linux, where the plugin looks processes up and opens terminals through `sh`. */
+function isUnix(ctx: Ctx): boolean {
+  return ctx.platform === 'darwin' || ctx.platform === 'linux'
 }
 
 function save($: Engine, ctx: Ctx, rec: SessionRecord): Promise<void> {
@@ -155,7 +164,7 @@ async function sync($: Engine, ctx: Ctx): Promise<void> {
 
 /** Whether this system has a process lookup: Windows through PowerShell, macOS and Linux through `ps` and /proc. */
 function canLookUp(ctx: Ctx): boolean {
-  return ctx.platform === 'windows' || ctx.platform === 'darwin' || ctx.platform === 'linux'
+  return ctx.isWindows || isUnix(ctx)
 }
 
 /**
@@ -163,7 +172,7 @@ function canLookUp(ctx: Ctx): boolean {
  * weeks.
  */
 async function identify($: Engine, ctx: Ctx): Promise<void> {
-  if (ctx.platform === 'darwin' || ctx.platform === 'linux') return identifyUnix($, ctx)
+  if (isUnix(ctx)) return identifyUnix($, ctx)
   if (!ctx.isWindows) return
   const script = [
     `$p = Get-CimInstance Win32_Process -Filter "ProcessId=$PID"`,
@@ -219,9 +228,11 @@ async function identifyUnix($: Engine, ctx: Ctx): Promise<void> {
 }
 
 async function liveness($: Engine, ctx: Ctx): Promise<Liveness | null> {
-  if (ctx.platform === 'darwin' || ctx.platform === 'linux') {
+  if (isUnix(ctx)) {
     const ran = await runSh($, PROCESSES).catch(() => undefined)
-    return ran?.exitCode === 0 ? parseLiveness(ran.stdout) : null
+    const alive = ran?.exitCode === 0 ? parseLiveness(ran.stdout) : undefined
+    // The listing always holds its own sh: an empty one failed, and would make every running session look gone.
+    return alive !== undefined && alive.size > 0 ? alive : null
   }
   if (!ctx.isWindows) return null
   const script = [
@@ -334,21 +345,40 @@ async function chooseTerminal($: Engine, ctx: Ctx): Promise<Where> {
     return iterm ? 'iterm' : 'terminal'
   }
   if (ctx.platform !== 'linux') return { reason: 'the plugin knows no terminal on this system' }
-  if (!(await $.env.get('DISPLAY')) && !(await $.env.get('WAYLAND_DISPLAY'))) return { reason: 'there is no display' }
-  const found = (await runSh($, FIND, LINUX_TERMINALS)).stdout.trim()
+  if (!(await hasDisplay($))) return { reason: 'there is no display' }
+  const found = await firstInstalled($, LINUX_TERMINALS)
 
-  return LINUX_TERMINALS.find(one => one === found) ?? { reason: `none of ${LINUX_TERMINALS.join(', ')} is installed` }
+  return found ?? { reason: `none of ${LINUX_TERMINALS.join(', ')} is installed` }
 }
 
-/** The terminal the option names, where it can open: on its system, inside tmux for tmux, on PATH for the others. */
+async function hasDisplay($: Engine): Promise<boolean> {
+  return Boolean((await $.env.get('DISPLAY')) || (await $.env.get('WAYLAND_DISPLAY')))
+}
+
+/** The first of the terminals on PATH; none where the search itself failed. */
+async function firstInstalled($: Engine, terminals: readonly OpenTerminal[]): Promise<OpenTerminal | undefined> {
+  const found = (await runSh($, FIND, terminals).catch(() => undefined))?.stdout.trim()
+
+  return terminals.find(one => one === found)
+}
+
+/**
+ * The terminal the option names, where it can open: Terminal and iTerm2 on macOS, tmux inside tmux, a Linux terminal
+ * on PATH and with a display, without which it would die unseen while its session counted as restored.
+ */
 async function available($: Engine, ctx: Ctx, terminal: OpenTerminal, inTmux: boolean): Promise<Where> {
   if (terminal === 'terminal' || terminal === 'iterm') {
     return ctx.platform === 'darwin' ? terminal : { reason: `${terminalName(terminal)} runs only on macOS` }
   }
   if (terminal === 'tmux') return inTmux ? 'tmux' : { reason: 'tmux opens a window only inside tmux' }
-  const found = (await runSh($, FIND, [terminal])).stdout.trim()
+  if (!(await hasDisplay($))) return { reason: 'there is no display' }
 
-  return found === terminal ? terminal : { reason: `${terminal} is not installed` }
+  return (await firstInstalled($, [terminal])) ?? { reason: `${terminal} is not installed` }
+}
+
+/** Whether the claude a window would run exists: a path an update removed, or a name only an alias gives, does not. */
+async function runnable($: Engine, claude: string): Promise<boolean> {
+  return (await runSh($, RUNNABLE, [claude]).catch(() => undefined))?.exitCode === 0
 }
 
 /** The claude on this session's PATH, by its absolute path, for a window whose PATH may not have it. */
@@ -383,13 +413,19 @@ async function restoreUnix($: Engine, ctx: Ctx, chosen: SessionRecord[], lines: 
       failed.push(`Skipped "${labelOf(rec)}": its record's id is not one Claude Code writes.`)
       continue
     }
+    const claude = env.claude ?? rec.exe
+    if (claude === undefined || !(await runnable($, claude))) {
+      failed.push(`Could not open "${labelOf(rec)}": no claude this session can run (${claude ?? 'none on PATH'}).`)
+      failed.push(`  Run: ${manualCommand(rec)}`)
+      continue
+    }
     try {
       const script = `${folder}/${rec.id}.sh`
       await $.fs.write(script, sessionScript(rec, ctx.shell, env))
       const argv = terminalArgv(where, script)
       // The first window macOS opens for an app may wait on the person allowing it to control Terminal or iTerm2.
       const timeoutMs = where === 'terminal' || where === 'iterm' ? 120_000 : 30_000
-      const ran = await $.process.run(returnsAtOnce(where) ? argv : detached(argv), { timeoutMs })
+      const ran = await $.process.run(returnsAtOnce(where) ? argv : detached(argv), { cwd: '/', timeoutMs })
       if (ran.exitCode !== 0) throw new Error(`exit ${ran.exitCode}: ${ran.stderr.trim().slice(0, 300)}`)
       opened.push(rec)
     } catch (err) {

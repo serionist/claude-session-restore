@@ -16,6 +16,7 @@ import {
   launchPlan,
   launchScript,
   MAX_AGE_MS,
+  machineOf,
   manualCommand,
   parseLiveness,
   parseLookup,
@@ -294,8 +295,7 @@ describe('macOS and Linux', () => {
       `unset ${SESSION_ENV.join(' ')}`,
       'export CLAUDE_CONFIG_DIR=/home/a/.claude',
       "/usr/local/bin/claude --resume s9 --add-dir '/home/a/it'\\''s here' --settings '{\"a\": 1}'",
-      // biome-ignore lint/suspicious/noTemplateCurlyInString: the script's shell expansion, not a template
-      'exec "${SHELL:-/bin/sh}" -l',
+      `exec "\${SHELL:-/bin/sh}" -l`,
       '',
     ])
     expect(sessionScript(UNIX, 'none').includes('exec "$')).toBe(false)
@@ -343,5 +343,20 @@ describe('macOS and Linux', () => {
     ])
     expect(returnsAtOnce('tmux')).toBe(true)
     expect(returnsAtOnce('x-terminal-emulator')).toBe(false)
+  })
+})
+
+describe('several machines sharing one records folder', () => {
+  test("a record of another machine is judged by its heartbeat, never by this machine's pids", () => {
+    const alive = new Map([
+      [1, 'here|5'],
+      [42, 'here|99'],
+    ])
+    expect(isInterrupted(rec({ pid: 42, pidStarted: 'there|7', lastSeen: NOW - 30_000 }), NOW, alive)).toBe(false)
+    expect(isInterrupted(rec({ pid: 42, pidStarted: 'there|7', lastSeen: NOW - STALE_MS - 1 }), NOW, alive)).toBe(true)
+    // This machine's record whose process is gone is offered at once, as before.
+    expect(isInterrupted(rec({ pid: 43, pidStarted: 'here|7', lastSeen: NOW - 30_000 }), NOW, alive)).toBe(true)
+    expect(machineOf('here|7')).toBe('here')
+    expect(machineOf('2026-10-28T10:00:00.0000000Z')).toBe(undefined)
   })
 })

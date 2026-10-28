@@ -175,7 +175,8 @@ Answered by the maintainer on 2026-10-28, with the recommendations, Q1 as amende
 | R3 | macOS asks the person once to let the restoring app control Terminal or iTerm2 | Accepted: `osascript` gets 120 seconds; a refusal is reported with the commands |
 | R4 | iTerm2's AppleScript is deprecated in favour of its Python API | Accepted: it still works and gets fixes; Terminal.app stays the fallback |
 | R5 | No CI runner has a desktop, so no test opens a window | Accepted: step 6, by hand |
-| R6 | A detached terminal that fails after it started can't be reported | Accepted: the window doesn't open, the record stays `restored`, and the session is offered again only if its process is not found |
+| R6 | A detached terminal that fails after it started can't be reported | Narrowed, then accepted (code review F4): a named terminal needs a display, and the claude to run must exist, before any window starts. A terminal that still dies after starting leaves the record `restored`, which is never offered again: the person resumes it by hand |
+| R7 | Several machines share one records folder (an NFS home, a container mounting `~/.claude`) | Resolved (code review F2): every start off Windows names its machine; another machine's record is judged by its heartbeat |
 
 ## Plan review
 

@@ -29,7 +29,7 @@ keep no transcript to resume, so they write none.
 | `status` | below |
 | `startedAt`, `lastSeen`, `endedAt` | milliseconds; `lastSeen` moves on every turn and every heartbeat |
 | `endReason` | the reason `session.end` gave |
-| `pid`, `pidStarted`, `exe` | the claude process and its start time (Windows), so a later scan can tell whether it still runs |
+| `pid`, `pidStarted`, `exe` | the claude process and its start (with its machine off Windows), so a later scan can tell whether it still runs |
 | `flags` | the launch flags worth repeating on resume (`pickResumeFlags`) |
 
 A record is written from the session's first turn: before that there is no transcript, and `--resume` would find
@@ -71,7 +71,7 @@ At start, and at later heartbeats until it succeeds, a PowerShell script walks u
 retried because it can time out while MCP servers are still spawning, at most `LOOKUP_TRIES` (5) times, at heartbeats
 0, 1, 3, 7 and 15, which covers a slow start after a restore opened many sessions at once: where it can't
 succeed (PowerShell blocked, claude running as `node.exe` from npm), the session counts as gone by its heartbeat
-alone, as off Windows. The command line becomes `flags`. Every
+alone. The command line becomes `flags`. Every
 PowerShell the plugin runs writes UTF-8 (`runPowerShell`): Windows PowerShell otherwise writes to a pipe in the
 console's code page, and a path like `C:\Users\Sóma` comes back garbled.
 
@@ -80,17 +80,22 @@ session looking alive once another process took its number.
 
 ## Finding the claude process (macOS, Linux)
 
-The same, through `sh` (`LOOKUP`): it walks up with `ps -o ppid=` to the nearest ancestor that is claude, named
-`claude` or a file under `claude/versions/` (where the native installer keeps each version), and prints its pid, start
-time, path and, on Linux, its arguments from `/proc/<pid>/cmdline`, NUL-separated and exact, which become `flags`.
-macOS has no exact arguments (`ps` joins them with spaces), so its sessions come back without their flags. The
-listing (`PROCESSES`) gives every process's start the same way:
+The same, through `sh` (`LOOKUP`): it walks up to the nearest ancestor that is claude, named `claude` or a file under
+`claude/versions/` (where the native installer keeps each version), and prints its pid, start, path and, on Linux, its
+arguments from `/proc/<pid>/cmdline`, NUL-separated and exact, which become `flags`. macOS has no exact arguments
+(`ps` joins them with spaces), so its sessions come back without their flags. On Linux the walk reads `/proc` alone,
+so a container without `ps` still finds its claude. The listing (`PROCESSES`) gives every process's start the same
+way, `<machine>|<start>`:
 
-- **Linux:** the boot's id and the tick the process started at (`/proc/<pid>/stat`, field 22). `ps`'s start time is
-  derived from the wall clock, which a laptop's wake may step, and would make every running session look gone.
-- **macOS:** `ps`'s start time in UTC, which macOS stores as it was.
+- **Linux:** the boot's id and the pid namespace, then the tick the process started at (`/proc/<pid>/stat`, field
+  22). `ps`'s start time is derived from the wall clock, which a laptop's wake may step, and would make every running
+  session look gone.
+- **macOS:** the boot session's id (`kern.bootsessionuuid`), then `ps`'s start time in UTC, which macOS stores as it
+  was.
 
-The lookup's folders reach it as arguments, never written into the script.
+The machine keeps apart the records of several machines sharing one folder (an NFS home, a container mounting
+`~/.claude`): a record whose machine this listing doesn't hold is judged by its heartbeat, since its pid means nothing
+here. An empty listing counts as none. The lookup's folders reach it as arguments, never written into the script.
 
 ## Offering and restoring
 
@@ -142,7 +147,6 @@ them is ever text a shell reads as code:
 | `Start-Process` | the console fallback's folder goes through `WildcardPattern.Escape`: `Start-Process` reads a working directory as a pattern, and `[old] api` would match nothing |
 | Windows Terminal | its arguments are quoted the way Windows splits a command line (`crtQuote`), with `;` written `\;`, the one character `wt` splits on itself |
 | claude | the tab script passes the arguments as an array; on PowerShell before 7.3 it escapes their double quotes and trailing backslashes first, which that PowerShell does not, so `--settings '{"a": 1}'` arrives whole. A bare `claude` (the path was not found) runs the program on PATH, never npm's `claude.ps1`, and without the flags: npm's `claude.cmd` would hand them to cmd |
-
 | `sh`, on macOS and Linux | inside the session's script only, each word single-quoted (`posixQuote`: `'` written `'\''`, nothing else special inside) |
 | AppleScript | the script's path only, as the run handler's argument (`osascript -e ... <path>`), never in the source; `quoted form of` quotes it for the window's shell |
 | tmux and the Linux terminals | the script's path as an argument of its own, after `-e` or `--`; never the folder, since tmux reads `-c` as a format, where `#(...)` runs a command |

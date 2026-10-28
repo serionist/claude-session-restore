@@ -31,6 +31,8 @@ type WorldOptions = {
   lookup?: string
   /** Off Windows: the launch that fails, by a word in its script's path (the session's id). */
   failsFor?: string
+  /** Off Windows: no claude this session can run (a path an update removed). */
+  noClaude?: boolean
 }
 
 /** Answers the session and its files beneath the plugin; what it writes, runs, logs and toasts is kept. */
@@ -112,7 +114,8 @@ function unixAnswer(argv: readonly string[], options: WorldOptions, alive: strin
   const script = argv[0] === '/bin/sh' && argv[1] === '-c' ? (argv[2] ?? '') : ''
   if (script.includes('command -v "$t"'))
     return ok(argv.slice(4).includes(options.installed ?? '') ? options.installed : '')
-  if (script === 'command -v claude') return ok('/home/test/.local/bin/claude')
+  if (script === 'command -v claude') return ok(options.noClaude ? '' : '/home/test/.local/bin/claude')
+  if (script === 'test -x "$1"') return options.noClaude ? { exitCode: 1, stdout: '', stderr: '' } : ok()
   if (script.includes('found_exe')) return ok(options.lookup ?? '')
   if (script.includes('ps -A -o pid=,lstart=')) return ok(alive)
   // A launch, which ends with the script's path.
@@ -475,8 +478,7 @@ describe('restoring on macOS and Linux', () => {
     const script = scriptOf(written, 'cut-1')
     expect(script.split('\n')[0]).toBe("cd '/home/test/r&d x'\\''$(calc)'\\''/cut-1' || exit 1")
     expect(script).toContain('/home/test/.local/bin/claude --resume cut-1 --model opus\n')
-    // biome-ignore lint/suspicious/noTemplateCurlyInString: the script's shell expansion, not a template
-    expect(script).toContain('exec "${SHELL:-/bin/sh}" -l')
+    expect(script).toContain(`exec "\${SHELL:-/bin/sh}" -l`)
     const launch = ran.at(-1) ?? []
     expect(launch.slice(0, 4)).toEqual(['/bin/sh', '-c', launch[2] ?? '', 'sh'])
     expect(launch[2]).toContain('setsid -f "$@"')
@@ -610,6 +612,109 @@ describe('restoring on macOS and Linux', () => {
     const live = unixRecord('cut-1', { status: 'open', pid: 42, pidStarted: 'b00t:7', lastSeen: NOW - 30 * MINUTE })
     const { session, clock } = world(on, { unix: LINUX, files: { 'cut-1.json': live } })
     session.alive = '42 b00t:7\n43 b00t:9\n'
+    await $.session.start(START)
+    await clock.settle()
+
+    const { text } = await $.command.run({ command: 'restore', args: '' } as Parameters<typeof $.command.run>[0])
+
+    expect(text).toBe('No interrupted sessions.')
+  })
+})
+
+describe('choosing where a session opens, off Windows', () => {
+  const RUN = { command: 'restore', args: 'all' }
+  const unixRecord = (id: string, over: Partial<SessionRecord> = {}) =>
+    record(id, { cwd: `/home/test/${id}`, exe: '/home/test/.local/share/claude/versions/2.1.306', ...over })
+
+  test('Linux with no display and no SSH prints the commands: there is no display', async ($, on) => {
+    const { clock } = world(on, {
+      unix: { name: 'Linux' },
+      installed: 'xterm',
+      files: { 'cut-1.json': unixRecord('cut-1') },
+    })
+    await $.session.start(START)
+    await clock.settle()
+
+    const { text } = await $.command.run(RUN as Parameters<typeof $.command.run>[0])
+
+    expect((text ?? '').split('\n')[0]).toBe('No terminal opened: there is no display.')
+  })
+
+  test('a terminal the option names needs a display too', { options: { terminal: 'xterm' } }, async ($, on) => {
+    const { written, clock } = world(on, {
+      unix: { name: 'Linux', env: { SSH_CONNECTION: '10.0.0.2 50000 10.0.0.1 22' } },
+      installed: 'xterm',
+      files: { 'cut-1.json': unixRecord('cut-1') },
+    })
+    await $.session.start(START)
+    await clock.settle()
+
+    const { text } = await $.command.run(RUN as Parameters<typeof $.command.run>[0])
+
+    expect((text ?? '').split('\n')[0]).toBe('No terminal opened: there is no display.')
+    expect(written.some(one => one.path.endsWith(`${SESSIONS}/cut-1.json`))).toBe(false)
+  })
+
+  test('a terminal the option names but not installed says so', { options: { terminal: 'xterm' } }, async ($, on) => {
+    const { clock } = world(on, {
+      unix: { name: 'Linux', env: { DISPLAY: ':0' } },
+      installed: 'kitty',
+      files: { 'cut-1.json': unixRecord('cut-1') },
+    })
+    await $.session.start(START)
+    await clock.settle()
+
+    const { text } = await $.command.run(RUN as Parameters<typeof $.command.run>[0])
+
+    expect((text ?? '').split('\n')[0]).toBe('No terminal opened: xterm is not installed.')
+  })
+
+  test('inside tmux over SSH, tmux opens the window: it runs on the machine the person is on', async ($, on) => {
+    const env = { TMUX: '/tmp/tmux-1/default,1,0', SSH_CONNECTION: '10.0.0.2 50000 10.0.0.1 22' }
+    const { ran, clock } = world(on, { unix: { name: 'Linux', env }, files: { 'cut-1.json': unixRecord('cut-1') } })
+    await $.session.start(START)
+    await clock.settle()
+
+    await $.command.run(RUN as Parameters<typeof $.command.run>[0])
+
+    expect((ran.at(-1) ?? []).slice(0, 2)).toEqual(['tmux', 'new-window'])
+  })
+
+  test('on macOS, iTerm2 is known by LC_TERMINAL too, which survives tmux and SSH', async ($, on) => {
+    const { ran, clock } = world(on, {
+      unix: { name: 'Darwin', env: { LC_TERMINAL: 'iTerm2' } },
+      files: { 'cut-1.json': unixRecord('cut-1') },
+    })
+    await $.session.start(START)
+    await clock.settle()
+
+    await $.command.run(RUN as Parameters<typeof $.command.run>[0])
+
+    expect(ran.at(-1)).toContain('tell application "iTerm2"')
+  })
+
+  test('a session whose claude no longer runs is printed, not opened and not marked', async ($, on) => {
+    const { written, ran, clock } = world(on, {
+      unix: { name: 'Linux', env: { DISPLAY: ':0' } },
+      installed: 'xterm',
+      noClaude: true,
+      files: { 'cut-1.json': unixRecord('cut-1') },
+    })
+    await $.session.start(START)
+    await clock.settle()
+
+    const { text } = await $.command.run(RUN as Parameters<typeof $.command.run>[0])
+
+    expect(text).toContain('Could not open "cut-1": no claude this session can run')
+    expect(text).toContain('  Run: cd /home/test/cut-1 && claude --resume cut-1 --model opus')
+    expect(ran.some(argv => argv.at(-1)?.endsWith('.sh'))).toBe(false)
+    expect(written.some(one => one.path.endsWith(`${SESSIONS}/cut-1.json`))).toBe(false)
+  })
+
+  test('an empty process listing is no listing: a session is then judged by its heartbeat', async ($, on) => {
+    const quiet = unixRecord('cut-1', { status: 'open', pid: 42, pidStarted: 'm|7', lastSeen: NOW - 30_000 })
+    const { session, clock } = world(on, { unix: { name: 'Linux' }, files: { 'cut-1.json': quiet } })
+    session.alive = ''
     await $.session.start(START)
     await clock.settle()
 

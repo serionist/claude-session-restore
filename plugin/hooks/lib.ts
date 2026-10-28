@@ -12,8 +12,18 @@ export const WT_WINDOW = 'claude-restore'
 
 export type Shell = 'powershell' | 'pwsh' | 'cmd' | 'none'
 
-/** Running claude processes: pid to process start time (ISO, UTC). */
+/**
+ * Running processes: pid to start. On Windows the start time (ISO, UTC); on macOS and Linux `<machine>|<start>`,
+ * where the machine (a boot, and on Linux a pid namespace) tells apart a record of another machine sharing the folder.
+ */
 export type Liveness = ReadonlyMap<number, string>
+
+/** The machine a start names, `<machine>|...`; undefined for a start that names none (Windows). */
+export function machineOf(started: string): string | undefined {
+  const bar = started.indexOf('|')
+
+  return bar < 0 ? undefined : started.slice(0, bar)
+}
 
 /**
  * `other` is a signal (SIGHUP when the terminal closes, SIGTERM at
@@ -33,7 +43,11 @@ export function isInterrupted(rec: SessionRecord, now: number, alive: Liveness |
   if (rec.status === 'interrupted') return true
   if (rec.status !== 'open') return false
   if (alive !== null && rec.pid !== undefined && rec.pidStarted !== undefined) {
-    return alive.get(rec.pid) !== rec.pidStarted
+    // A record from another machine sharing the folder (an NFS home, a container mounting ~/.claude): its pid means
+    // nothing in this listing, so its heartbeat decides.
+    const machine = machineOf(rec.pidStarted)
+    const here = machine === undefined || [...alive.values()].some(started => machineOf(started) === machine)
+    if (here) return alive.get(rec.pid) !== rec.pidStarted
   }
 
   return now - rec.lastSeen > STALE_MS
@@ -480,8 +494,7 @@ export function sessionScript(rec: SessionRecord, shell: Shell, env: ScriptEnv =
     `unset ${SESSION_ENV.join(' ')}`,
     ...(env.configDir === undefined ? [] : [`export CLAUDE_CONFIG_DIR=${posixQuote(env.configDir)}`]),
     argv.map(posixQuote).join(' '),
-    // biome-ignore lint/suspicious/noTemplateCurlyInString: a shell parameter expansion, read by /bin/sh, not a template
-    ...(shell === 'none' ? [] : ['exec "${SHELL:-/bin/sh}" -l']),
+    ...(shell === 'none' ? [] : [`exec "\${SHELL:-/bin/sh}" -l`]),
     '',
   ].join('\n')
 }
@@ -541,11 +554,11 @@ export function returnsAtOnce(terminal: OpenTerminal): boolean {
 /**
  * Runs its arguments as a program apart from this process and its session, its output nowhere, and returns at once:
  * the desktop terminals run until their window closes (Debian's x-terminal-emulator waits on purpose), and a call
- * held past its time is killed, the restored claude with it. The program and its arguments arrive as "$@", never as
- * text the shell reads.
+ * held past its time is killed, the restored claude with it. `setsid -f`, else `nohup ... &` where there is no setsid
+ * or it has no `-f` (busybox). The program and its arguments arrive as "$@", never as text the shell reads.
  */
 export const DETACH =
-  'if command -v setsid >/dev/null 2>&1; then setsid -f "$@" </dev/null >/dev/null 2>&1; ' +
+  'if command -v setsid >/dev/null 2>&1 && setsid -f "$@" </dev/null >/dev/null 2>&1; then :; ' +
   'else nohup "$@" </dev/null >/dev/null 2>&1 & fi'
 
 export function detached(argv: readonly string[]): string[] {
@@ -558,47 +571,64 @@ export const FIND = 'for t in "$@"; do if command -v "$t" >/dev/null 2>&1; then 
 /** Prints the path of the claude on PATH. */
 export const WHICH_CLAUDE = 'command -v claude'
 
+/** Succeeds when its argument is a program this session can run. */
+export const RUNNABLE = 'test -x "$1"'
+
 /**
- * A process's start time, as the lookup and the listing both write it. On Linux, the boot's id and the tick the
- * process started at, from /proc: `ps` derives its start time from the wall clock, so a clock stepped after a laptop
- * wakes would make every running session look gone. On macOS, `ps` in UTC, its start time stored as it was.
+ * Shell functions the lookup and the listing share. A start is `<machine>|<start>`: the machine is the boot and, on
+ * Linux, the pid namespace, so a record of another machine sharing the folder (an NFS home, a container mounting
+ * ~/.claude) is never judged by this one's pids. On Linux the start is the tick the process started at, from /proc:
+ * `ps` derives its start time from the wall clock, so a clock stepped after a laptop wakes would make every running
+ * session look gone. On macOS it is `ps`'s start time in UTC, which macOS stores as it was. On Linux nothing here
+ * needs `ps`, which slim containers lack.
  */
-const STARTED = [
-  // Field 22 of /proc/<pid>/stat. The command's name, field 2, may hold spaces and parentheses, so the fields are
-  // counted after its last `) `; `shift` is a special builtin, whose failure would end the script, so it is guarded.
-  'tick() {',
+const SHARED = [
+  'machine() {',
+  '  if [ -r /proc/sys/kernel/random/boot_id ]; then',
+  '    read -r boot < /proc/sys/kernel/random/boot_id',
+  '    echo "$boot/$(readlink /proc/self/ns/pid 2>/dev/null)"',
+  '  else',
+  '    sysctl -n kern.bootsessionuuid 2>/dev/null',
+  '  fi',
+  '}',
+  // The fields of /proc/<pid>/stat after the command's name, field 2, which may hold spaces and parentheses: the
+  // fields are counted after its last `) `. `shift` is a special builtin, whose failure would end the script. The
+  // field's number is kept first, since `set --` replaces the function's own arguments.
+  'field() {',
+  '  n=$1',
   '  set -f',
-  // biome-ignore lint/suspicious/noTemplateCurlyInString: a shell parameter expansion, read by /bin/sh, not a template
-  '  set -- ${1##*) }',
+  `  set -- \${2##*) }`,
   '  set +f',
-  '  if [ "$#" -ge 20 ]; then shift 19; echo "$1"; fi',
+  '  if [ "$#" -ge "$n" ]; then shift $((n - 1)); echo "$1"; fi',
   '}',
   'started() {',
-  '  if [ -r /proc/sys/kernel/random/boot_id ] && read -r stat 2>/dev/null < "/proc/$1/stat"; then',
-  '    read -r boot < /proc/sys/kernel/random/boot_id',
-  '    t=$(tick "$stat")',
-  '    if [ -n "$t" ]; then echo "$boot:$t"; fi',
+  '  if read -r stat 2>/dev/null < "/proc/$1/stat"; then',
+  '    t=$(field 20 "$stat")',
+  '    if [ -n "$t" ]; then echo "$(machine)|$t"; fi',
   '  else',
-  '    TZ=UTC0 LC_ALL=C ps -o lstart= -p "$1"',
+  '    echo "$(machine)|$(TZ=UTC0 LC_ALL=C ps -o lstart= -p "$1")"',
   '  fi',
+  '}',
+  'parent() {',
+  '  if read -r stat 2>/dev/null < "/proc/$1/stat"; then field 2 "$stat"; else ps -o ppid= -p "$1" 2>/dev/null; fi',
   '}',
 ].join('\n')
 
 /**
  * Finds this session's claude process off Windows, run as `sh -c LOOKUP sh <records folder> <scripts folder>`: walks
  * up from its own pid to the nearest ancestor that is claude (named claude, or a file under `claude/versions/`, where
- * the native installer keeps each version), on through any claude above it, and prints its pid, its start time, its
- * path and, where /proc has them, its exact arguments, the last two in base64. Then prunes the records and the
- * scripts untouched for 14 days, the folders given as arguments, never written into the script.
+ * the native installer keeps each version), on through any claude above it, and prints its pid, its start, its path
+ * and, where /proc has them, its exact arguments, the last two in base64. Then prunes the records and the scripts
+ * untouched for 14 days, the folders given as arguments, never written into the script.
  */
 export const LOOKUP = [
-  STARTED,
+  SHARED,
   'p=$$',
   'found=',
   'i=0',
   'while [ "$i" -lt 16 ]; do',
   '  i=$((i + 1))',
-  '  p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d " ")',
+  '  p=$(parent "$p" | tr -d " ")',
   '  case "$p" in ""|0|1) break ;; esac',
   '  if [ -r "/proc/$p/exe" ]; then exe=$(readlink "/proc/$p/exe"); else exe=$(ps -o comm= -p "$p"); fi',
   '  case "$exe" in',
@@ -619,22 +649,21 @@ export const LOOKUP = [
   'exit 0',
 ].join('\n')
 
-/** Every running process, `<pid> <start time>`, the start time as LOOKUP writes it. */
+/** Every running process, `<pid> <machine>|<start>`, as LOOKUP writes a start. */
 export const PROCESSES = [
+  SHARED,
+  'm=$(machine)',
   'if [ -r /proc/sys/kernel/random/boot_id ]; then',
-  '  read -r boot < /proc/sys/kernel/random/boot_id',
   // No subshell per process: a busy machine runs hundreds, and the listing runs at every scan.
   '  for d in /proc/[0-9]*; do',
   '    read -r stat 2>/dev/null < "$d/stat" || continue',
   '    set -f',
-  // biome-ignore lint/suspicious/noTemplateCurlyInString: a shell parameter expansion, read by /bin/sh, not a template
-  '    set -- ${stat##*) }',
+  `    set -- \${stat##*) }`,
   '    set +f',
-  // biome-ignore lint/suspicious/noTemplateCurlyInString: a shell parameter expansion, read by /bin/sh, not a template
-  '    if [ "$#" -ge 20 ]; then shift 19; echo "${d#/proc/} $boot:$1"; fi',
+  `    if [ "$#" -ge 20 ]; then shift 19; echo "\${d#/proc/} $m|$1"; fi`,
   '  done',
   'else',
-  '  TZ=UTC0 LC_ALL=C ps -A -o pid=,lstart=',
+  '  TZ=UTC0 LC_ALL=C ps -A -o pid=,lstart= | while read -r pid rest; do echo "$pid $m|$rest"; done',
   'fi',
   'exit 0',
 ].join('\n')

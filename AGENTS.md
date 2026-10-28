@@ -13,14 +13,14 @@ crash, a restart or a closed terminal cut off. The repo is its own marketplace.
   `types/index.d.ts` declares the record and the plugin's state.
 - **It runs inside Claude Code,** in an environment with no DOM and no Node: everything outside reaches it through `$`
   (`$.fs`, `$.process`, `$.session`, `$.ui`). The API is early access and changes between Claude Code releases.
-- **Windows first:** finding the claude process and reopening sessions in Windows Terminal are Windows-only; elsewhere
-  `/restore` prints the commands to run. `docs/design.md` says how each part works.
+- **On every system:** Windows Terminal (or console windows) on Windows; Terminal, iTerm2 or tmux on macOS; tmux or the
+  desktop's terminal on Linux; the commands printed where no window can open. `docs/design.md` says how each part works.
 
 ## Where things are
 
 | Path | What |
 |---|---|
-| `plugin/` | the plugin: `.claude-plugin/plugin.json` (name, version, the `shell` option), `hooks/` (`hooks.json`, `register.tsx`, `lib.ts`, and their tests `register.test.tsx`, `lib.test.ts`), `types/index.d.ts`, `tsconfig.json`, `README.md` |
+| `plugin/` | the plugin: `.claude-plugin/plugin.json` (name, version, the `shell` and `terminal` options), `hooks/` (`hooks.json`, `register.tsx`, `lib.ts`, and their tests `register.test.tsx`, `lib.test.ts`), `types/index.d.ts`, `tsconfig.json`, `README.md` |
 | `.claude-plugin/marketplace.json` | the marketplace: one plugin, source `./plugin` |
 | `docs/` | `design.md` (how it works), `releasing.md`, `testing-by-hand.md` (a real window, on each system); `plans/`, `reviews/`: dated records, never current truth |
 | `tools/` | `gate.ts` (the gate), `hooks.ts` (behind `.githooks/`), `setup.ts` (once per clone; `link` for skills), `gate.test.ts`, `launcher.test.ts` (the restore scripts run for real: PowerShell on Windows, `sh` on macOS and Linux), `try-restore.sh` (the by-hand test's setup and check); Node's standard library only |
@@ -135,7 +135,7 @@ Context7 (`.mcp.json`) or the vendor's docs, never memory.
 - Check out, build or run code from outside the maintainers (a contributor's PR or branch) on your machine: read it,
   and let CI run it. A hooks module runs in every Claude session, with every credential there.
 - Put a record's text (a folder, a flag, a path) into a script or a command line a shell parses: it travels as data
-  (`psString`, `crtQuote`; `docs/design.md`).
+  (`psString`, `crtQuote`, `posixQuote`; `docs/design.md`).
 - Add tool attribution: commits, PR titles, PR bodies.
 - Commit secrets, or a real person's session record: tests use invented ones.
 - Change a one-way door without the maintainer's agreement.
