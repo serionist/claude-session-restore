@@ -9,7 +9,7 @@ are in [AGENTS.md](../AGENTS.md).
 |---|---|
 | `plugin/hooks/register.tsx` | the hooks: `session.start`, `turn.complete`, `session.end`, `classic.SessionStart`, the `/restore` command, the band above the prompt and the pane; everything that calls `$` |
 | `plugin/hooks/register.test.tsx` | the hooks through the engine's test kit: the record's life, the band's clicks, the restores, the clock mocked |
-| `plugin/hooks/lib.ts` | the pure logic, tested without the engine: which sessions count as cut off, the launch flags kept, every command line |
+| `plugin/hooks/lib.ts` | the pure logic, tested without the engine: which sessions count as cut off, the launch flags kept, every command line and script, for Windows and for macOS and Linux |
 | `plugin/types/index.d.ts` | `SessionRecord`, `SessionStatus`, and the plugin's one `$.state` value, `session-restore.interrupted` |
 | `plugin/hooks/lib.test.ts` | the tests, run by `claude plugin test plugin` in the engine's sandbox |
 
@@ -52,13 +52,14 @@ new one starts at the next turn.
 
 | Status | Set when | Offered for restore |
 |---|---|---|
-| `open` | each turn and heartbeat | when its process is gone: on Windows the pid and its start time no longer match a running claude; elsewhere no heartbeat for 5 minutes |
+| `open` | each turn and heartbeat | when its process is gone: its pid and start time no longer match a running process; where the lookup found none, no heartbeat for 5 minutes |
 | `closed` | `session.end` for any reason but a signal: `/exit`, ctrl+c, `/clear`, `/resume`, logout | never |
 | `interrupted` | `session.end` with reason `other`: a signal, as when the terminal closes or Windows shuts down | yes |
 | `restored` | this plugin reopened it; the resumed session marks it `open` again | no |
 | `dismissed` | the person chose Dismiss, Forget all or `/restore forget` | no |
 
-Nothing older than 7 days is offered. On Windows, records untouched for 14 days are deleted at each session's start.
+Nothing older than 7 days is offered. Records untouched for 14 days are deleted by the process lookup, with the
+scripts of macOS and Linux.
 
 The folder kept is the session's project root (`$.session.root()`), not `cwd()`: a shell `cd` inside a tool moves
 the second, and `claude --resume` finds a session only from the folder it started in.
@@ -76,6 +77,20 @@ console's code page, and a path like `C:\Users\Sóma` comes back garbled.
 
 Whether a session still runs is the pair (pid, start time): Windows reuses pids, so a pid alone would keep a dead
 session looking alive once another process took its number.
+
+## Finding the claude process (macOS, Linux)
+
+The same, through `sh` (`LOOKUP`): it walks up with `ps -o ppid=` to the nearest ancestor that is claude, named
+`claude` or a file under `claude/versions/` (where the native installer keeps each version), and prints its pid, start
+time, path and, on Linux, its arguments from `/proc/<pid>/cmdline`, NUL-separated and exact, which become `flags`.
+macOS has no exact arguments (`ps` joins them with spaces), so its sessions come back without their flags. The
+listing (`PROCESSES`) gives every process's start the same way:
+
+- **Linux:** the boot's id and the tick the process started at (`/proc/<pid>/stat`, field 22). `ps`'s start time is
+  derived from the wall clock, which a laptop's wake may step, and would make every running session look gone.
+- **macOS:** `ps`'s start time in UTC, which macOS stores as it was.
+
+The lookup's folders reach it as arguments, never written into the script.
 
 ## Offering and restoring
 
@@ -102,8 +117,18 @@ session looking alive once another process took its number.
   session in its folder. `Start-Process` hands the new processes none of the launcher's handles, so the launcher
   returns at once.
 - A session whose folder no longer exists is skipped and named.
-- **Elsewhere** (macOS, Linux), `/restore` prints a `cd <folder> && claude --resume <id> ...` line per session, quoted
-  for a POSIX shell.
+- **On macOS and Linux** (`restoreUnix`), each session gets a script, `<config>/session-restore/launch/<id>.sh`
+  (`sessionScript`): `cd` into the folder, the session variables cleared, `CLAUDE_CONFIG_DIR` kept when the restoring
+  session has one, the claude on the restoring session's PATH run with `--resume <id>` and the flags, then the
+  person's login shell unless the `shell` option is `none`. A terminal then opens a window running `/bin/sh <script>`
+  (`terminalArgv`), chosen by `chooseTerminal`: the `terminal` option; else tmux inside tmux; nothing over SSH, where
+  a window would open on the other machine; Terminal or iTerm2 (`TERM_PROGRAM`, `LC_TERMINAL`) on macOS; on Linux with
+  a display, the first of `LINUX_TERMINALS` on PATH. Where none can open, the commands are printed with why:
+  `cd <folder> && claude --resume <id> ...`, quoted for a POSIX shell.
+- **Started apart:** the Linux desktop terminals run until their window closes (Debian's `x-terminal-emulator` waits
+  on purpose), and a call held past its time is killed, the window with it. They start through `setsid -f`
+  (`detached`), which returns at once; Terminal, iTerm2 and tmux return by themselves, and say when they failed.
+- Each session is marked `restored` once its own window opened; one that failed is named, with its command.
 
 ## Where a folder or a flag can never become a command
 
@@ -118,8 +143,13 @@ them is ever text a shell reads as code:
 | Windows Terminal | its arguments are quoted the way Windows splits a command line (`crtQuote`), with `;` written `\;`, the one character `wt` splits on itself |
 | claude | the tab script passes the arguments as an array; on PowerShell before 7.3 it escapes their double quotes and trailing backslashes first, which that PowerShell does not, so `--settings '{"a": 1}'` arrives whole. A bare `claude` (the path was not found) runs the program on PATH, never npm's `claude.ps1`, and without the flags: npm's `claude.cmd` would hand them to cmd |
 
-`plugin/hooks/lib.test.ts` checks the scripts carry no record text, and `tools/launcher.test.ts` runs them in Windows
-PowerShell and PowerShell 7 with hostile arguments, on CI's Windows job.
+| `sh`, on macOS and Linux | inside the session's script only, each word single-quoted (`posixQuote`: `'` written `'\''`, nothing else special inside) |
+| AppleScript | the script's path only, as the run handler's argument (`osascript -e ... <path>`), never in the source; `quoted form of` quotes it for the window's shell |
+| tmux and the Linux terminals | the script's path as an argument of its own, after `-e` or `--`; never the folder, since tmux reads `-c` as a format, where `#(...)` runs a command |
+
+`plugin/hooks/lib.test.ts` checks the scripts carry no record text, and `tools/launcher.test.ts` runs them for real
+with hostile arguments: in Windows PowerShell and PowerShell 7 on CI's Windows job, in `sh` on its Linux and macOS
+jobs. A window opening is tried by hand (`docs/testing-by-hand.md`).
 
 ## The flags kept on resume
 

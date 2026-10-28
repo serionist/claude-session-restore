@@ -2,32 +2,50 @@ import type { EngineInterface, Register } from 'claude-code'
 import { atom, read, update } from 'claude-code'
 
 import type { SessionRecord } from '../types'
-import type { Liveness, Shell } from './lib'
+import type { Liveness, OpenTerminal, Shell, Terminal } from './lib'
 import {
   ago,
+  detached,
   encodePowerShell,
+  FIND,
   HEARTBEAT_MS,
   isInterrupted,
+  LINUX_TERMINALS,
+  LOOKUP,
   LOOKUP_TRIES,
   labelOf,
   launchPlan,
   launchScript,
   manualCommand,
+  PROCESSES,
   parseLiveness,
+  parseLookup,
   pickResumeFlags,
   psString,
+  returnsAtOnce,
+  sessionScript,
   splitCommandLine,
   statusForEnd,
+  TERMINALS,
+  terminalArgv,
+  terminalName,
   titleFromPrompt,
   UTF8_OUTPUT,
+  WHICH_CLAUDE,
 } from './lib'
 
 type Engine = EngineInterface
 
+/** The system this process runs on: Windows by its OS variable, the others by `uname -s`. */
+type Platform = 'windows' | 'darwin' | 'linux' | 'other'
+
 /** What this process knows about itself; module variables, so a reload starts it over. */
 type Ctx = {
   shell: Shell
+  /** Where a restore opens off Windows (the `terminal` option). */
+  terminal: Terminal
   dir: string | null
+  platform: Platform
   isWindows: boolean
   isTracking: boolean
   facts: Pick<SessionRecord, 'pid' | 'pidStarted' | 'exe' | 'flags'>
@@ -58,11 +76,30 @@ function plural(n: number, word: string): string {
 async function setup($: Engine, ctx: Ctx): Promise<string> {
   if (ctx.dir !== null) return ctx.dir
   ctx.isWindows = (await $.env.get('OS')) === 'Windows_NT'
+  ctx.platform = ctx.isWindows ? 'windows' : await unixName($)
   const home = (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME')) ?? '.'
   const config = (await $.env.get('CLAUDE_CONFIG_DIR')) ?? `${home}/.claude`
   ctx.dir = `${config}/session-restore/sessions`.replace(/\\/g, '/')
 
   return ctx.dir
+}
+
+/** macOS or Linux by `uname -s`; the engine names no system. */
+async function unixName($: Engine): Promise<Platform> {
+  const ran = await $.process.run(['uname', '-s'], { timeoutMs: 10_000 }).catch(() => undefined)
+  const name = ran?.stdout.trim()
+
+  return name === 'Darwin' ? 'darwin' : name === 'Linux' ? 'linux' : 'other'
+}
+
+/** The plugin's own folder: the records under `sessions/`, the plans and scripts a restore writes beside them. */
+function home(dir: string): string {
+  return dir.replace(/\/sessions$/, '')
+}
+
+/** A fixed script run by /bin/sh, its arguments as "$1" and on: data, never text the shell reads. */
+function runSh($: Engine, script: string, args: readonly string[] = [], timeoutMs = 30_000) {
+  return $.process.run(['/bin/sh', '-c', script, 'sh', ...args], { timeoutMs })
 }
 
 function save($: Engine, ctx: Ctx, rec: SessionRecord): Promise<void> {
@@ -116,11 +153,17 @@ async function sync($: Engine, ctx: Ctx): Promise<void> {
   await save($, ctx, ctx.tracked)
 }
 
+/** Whether this system has a process lookup: Windows through PowerShell, macOS and Linux through `ps` and /proc. */
+function canLookUp(ctx: Ctx): boolean {
+  return ctx.platform === 'windows' || ctx.platform === 'darwin' || ctx.platform === 'linux'
+}
+
 /**
- * Finds this session's claude process (its pid, start time and launch
- * flags) and prunes records untouched for two weeks. Windows only.
+ * Finds this session's claude process (its pid, start time and launch flags) and prunes records untouched for two
+ * weeks.
  */
 async function identify($: Engine, ctx: Ctx): Promise<void> {
+  if (ctx.platform === 'darwin' || ctx.platform === 'linux') return identifyUnix($, ctx)
   if (!ctx.isWindows) return
   const script = [
     `$p = Get-CimInstance Win32_Process -Filter "ProcessId=$PID"`,
@@ -155,7 +198,31 @@ async function identify($: Engine, ctx: Ctx): Promise<void> {
   }
 }
 
+/**
+ * macOS and Linux: the lookup walks up to the claude process, and prunes the records and the scripts. The flags come
+ * from /proc on Linux; macOS has none to read exactly, so its sessions come back without theirs.
+ */
+async function identifyUnix($: Engine, ctx: Ctx): Promise<void> {
+  const folder = home(await setup($, ctx))
+  const { exitCode, stdout, stderr } = await runSh($, LOOKUP, [`${folder}/sessions`, `${folder}/launch`])
+  const found = parseLookup(stdout)
+  if (found === undefined) {
+    $.ui.log(`session-restore: no claude process found (exit ${exitCode}): ${stderr.trim()}`, { to: 'debug' })
+    return
+  }
+  ctx.facts = {
+    pid: found.pid,
+    pidStarted: found.started,
+    exe: found.exe,
+    flags: found.args === undefined ? [] : pickResumeFlags(found.args),
+  }
+}
+
 async function liveness($: Engine, ctx: Ctx): Promise<Liveness | null> {
+  if (ctx.platform === 'darwin' || ctx.platform === 'linux') {
+    const ran = await runSh($, PROCESSES).catch(() => undefined)
+    return ran?.exitCode === 0 ? parseLiveness(ran.stdout) : null
+  }
   if (!ctx.isWindows) return null
   const script = [
     `Get-CimInstance Win32_Process -Filter "Name like 'claude%'" | ForEach-Object {`,
@@ -200,7 +267,7 @@ async function scan($: Engine, ctx: Ctx): Promise<SessionRecord[]> {
  * folder or flag is ever part of a script, and many sessions don't make a command line too long to start.
  */
 async function launch($: Engine, ctx: Ctx, recs: readonly SessionRecord[]): Promise<void> {
-  const plan = `${(await setup($, ctx)).replace(/\/sessions$/, '')}/launch.json`
+  const plan = `${home(await setup($, ctx))}/launch.json`
   await $.fs.write(plan, JSON.stringify(launchPlan(recs, ctx.shell), null, 2))
   const ran = await runPowerShell($, launchScript(plan))
   if (ran.exitCode !== 0) throw new Error(`exit ${ran.exitCode}: ${ran.stderr.trim().slice(0, 300)}`)
@@ -245,15 +312,113 @@ function errorText(err: unknown): string {
 /** What a restore did, as lines to show, and whether they hold commands for the person to run. */
 type Restored = { text: string; commands: boolean }
 
+/** A terminal to open, or why none is opened. */
+type Where = OpenTerminal | { reason: string }
+
+/**
+ * Off Windows: the terminal the `terminal` option names, else tmux when this session runs inside it, nothing over SSH
+ * (a window would open on the other machine), Terminal or iTerm2 on macOS, and on Linux with a display the first of
+ * LINUX_TERMINALS installed.
+ */
+async function chooseTerminal($: Engine, ctx: Ctx): Promise<Where> {
+  if (ctx.terminal === 'print') return { reason: 'the terminal option is print' }
+  const inTmux = Boolean(await $.env.get('TMUX'))
+  if (ctx.terminal !== 'auto') return available($, ctx, ctx.terminal, inTmux)
+  if (inTmux) return 'tmux'
+  if ((await $.env.get('SSH_CONNECTION')) || (await $.env.get('SSH_TTY'))) {
+    return { reason: 'this session runs over SSH, and a window would open on the other machine' }
+  }
+  if (ctx.platform === 'darwin') {
+    // TERM_PROGRAM, or LC_TERMINAL, which iTerm2 also sets and which survives tmux and SSH.
+    const iterm = (await $.env.get('TERM_PROGRAM')) === 'iTerm.app' || (await $.env.get('LC_TERMINAL')) === 'iTerm2'
+    return iterm ? 'iterm' : 'terminal'
+  }
+  if (ctx.platform !== 'linux') return { reason: 'the plugin knows no terminal on this system' }
+  if (!(await $.env.get('DISPLAY')) && !(await $.env.get('WAYLAND_DISPLAY'))) return { reason: 'there is no display' }
+  const found = (await runSh($, FIND, LINUX_TERMINALS)).stdout.trim()
+
+  return LINUX_TERMINALS.find(one => one === found) ?? { reason: `none of ${LINUX_TERMINALS.join(', ')} is installed` }
+}
+
+/** The terminal the option names, where it can open: on its system, inside tmux for tmux, on PATH for the others. */
+async function available($: Engine, ctx: Ctx, terminal: OpenTerminal, inTmux: boolean): Promise<Where> {
+  if (terminal === 'terminal' || terminal === 'iterm') {
+    return ctx.platform === 'darwin' ? terminal : { reason: `${terminalName(terminal)} runs only on macOS` }
+  }
+  if (terminal === 'tmux') return inTmux ? 'tmux' : { reason: 'tmux opens a window only inside tmux' }
+  const found = (await runSh($, FIND, [terminal])).stdout.trim()
+
+  return found === terminal ? terminal : { reason: `${terminal} is not installed` }
+}
+
+/** The claude on this session's PATH, by its absolute path, for a window whose PATH may not have it. */
+async function claudeOnPath($: Engine): Promise<string | undefined> {
+  const path = (await runSh($, WHICH_CLAUDE).catch(() => undefined))?.stdout.trim()
+
+  return path?.startsWith('/') ? path : undefined
+}
+
+/**
+ * Off Windows: a window per session, each running a script of its own, or the commands to run where no terminal can
+ * open. Each session is marked restored once its own window opened; one that failed is named, with its command.
+ */
+async function restoreUnix($: Engine, ctx: Ctx, chosen: SessionRecord[], lines: string[]): Promise<Restored> {
+  const where = await chooseTerminal($, ctx)
+  if (typeof where !== 'string') {
+    const commands = ['Run these to reopen them:', ...chosen.map(manualCommand)]
+    return { text: [`No terminal opened: ${where.reason}.`, ...commands, ...lines].join('\n'), commands: true }
+  }
+
+  const folder = `${home(await setup($, ctx))}/launch`
+  const env = { claude: await claudeOnPath($), configDir: await $.env.get('CLAUDE_CONFIG_DIR') }
+  const opened: SessionRecord[] = []
+  const failed: string[] = []
+  for (const rec of chosen) {
+    if (!(await $.fs.exists(rec.cwd))) {
+      lines.push(`Skipped "${labelOf(rec)}": ${rec.cwd} no longer exists.`)
+      continue
+    }
+    // The id names the script's file; anything but an id's characters stays out of the path.
+    if (!/^[\w-]+$/.test(rec.id)) {
+      failed.push(`Skipped "${labelOf(rec)}": its record's id is not one Claude Code writes.`)
+      continue
+    }
+    try {
+      const script = `${folder}/${rec.id}.sh`
+      await $.fs.write(script, sessionScript(rec, ctx.shell, env))
+      const argv = terminalArgv(where, script)
+      // The first window macOS opens for an app may wait on the person allowing it to control Terminal or iTerm2.
+      const timeoutMs = where === 'terminal' || where === 'iterm' ? 120_000 : 30_000
+      const ran = await $.process.run(returnsAtOnce(where) ? argv : detached(argv), { timeoutMs })
+      if (ran.exitCode !== 0) throw new Error(`exit ${ran.exitCode}: ${ran.stderr.trim().slice(0, 300)}`)
+      opened.push(rec)
+    } catch (err) {
+      failed.push(`Could not open ${terminalName(where)} for "${labelOf(rec)}": ${errorText(err)}`)
+      failed.push(`  Run: ${manualCommand(rec)}`)
+    }
+  }
+
+  const reopened = `Reopened ${plural(opened.length, 'session')} in ${terminalName(where)}`
+  try {
+    for (const rec of opened) await save($, ctx, { ...rec, status: 'restored' })
+    if (opened.length > 0) lines.unshift(`${reopened}.`)
+  } catch (err) {
+    lines.unshift(`${reopened}, but could not mark them restored (${errorText(err)}): they may be offered again.`)
+  }
+  if (opened.length > 0) $.ui.toast(reopened)
+  if (failed.length > 0) $.ui.toast('Could not reopen some sessions: see the transcript')
+  await scan($, ctx).catch(() => undefined)
+
+  return { text: [...lines, ...failed].join('\n'), commands: failed.length > 0 }
+}
+
 function restore($: Engine, ctx: Ctx, ids: readonly string[]): Promise<Restored> {
   return oneAtATime(ctx, async () => {
     const [chosen, lines] = await stillCutOff($, ctx, ids)
     if (chosen.length === 0) {
       return { text: lines.length > 0 ? lines.join('\n') : 'No interrupted sessions to restore.', commands: false }
     }
-    if (!ctx.isWindows) {
-      return { text: ['Run these to reopen them:', ...chosen.map(manualCommand), ...lines].join('\n'), commands: true }
-    }
+    if (!ctx.isWindows) return restoreUnix($, ctx, chosen, lines)
 
     const ready: SessionRecord[] = []
     const gone: SessionRecord[] = []
@@ -331,7 +496,7 @@ function dismissFromClick($: Engine, ctx: Ctx, ids: readonly string[]): void {
 async function beat($: Engine, ctx: Ctx): Promise<void> {
   const n = ctx.beats++
   const due = ((n + 1) & n) === 0
-  if (ctx.isWindows && ctx.facts.pid === undefined && due && ctx.lookups < LOOKUP_TRIES) {
+  if (canLookUp(ctx) && ctx.facts.pid === undefined && due && ctx.lookups < LOOKUP_TRIES) {
     ctx.lookups++
     await identify($, ctx).catch(err => $.ui.log(`session-restore: identify failed: ${err}`, { to: 'debug' }))
   }
@@ -364,7 +529,9 @@ function listing(list: readonly SessionRecord[], now: number): string {
 export const register: Register = (on, options) => {
   const ctx: Ctx = {
     shell: SHELLS.find(one => one === options.shell) ?? 'powershell',
+    terminal: TERMINALS.find(one => one === options.terminal) ?? 'auto',
     dir: null,
+    platform: 'other',
     isWindows: false,
     isTracking: false,
     facts: {},
