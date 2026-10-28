@@ -1,25 +1,36 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import type { SessionRecord } from '../types'
-import type { Shell } from './lib'
+import type { OpenTerminal, Shell } from './lib'
 import {
+  appleScript,
   claudeArgv,
+  cleanDir,
   consoleStarts,
   crtQuote,
+  DETACH,
+  detached,
   encodePowerShell,
   isInterrupted,
+  LINUX_TERMINALS,
   launchPlan,
   launchScript,
   MAX_AGE_MS,
+  machineOf,
   manualCommand,
   parseLiveness,
+  parseLookup,
   pickResumeFlags,
+  posixQuote,
+  returnsAtOnce,
   runArgvScript,
   SESSION_ENV,
   STALE_MS,
+  sessionScript,
   splitCommandLine,
   statusForEnd,
   tabArgv,
+  terminalArgv,
   WT_LINE_MAX,
   wtLines,
 } from './lib'
@@ -248,5 +259,104 @@ describe('reopening', () => {
   test('encodes a script as UTF-16LE base64', () => {
     expect(encodePowerShell('dir')).toBe('ZABpAHIA')
     expect(encodePowerShell('ab')).toBe('YQBiAA==')
+  })
+})
+
+describe('macOS and Linux', () => {
+  const UNIX = rec({
+    id: 's9',
+    cwd: "/home/a/r&d x'$(calc)'#(touch pwned); %PATH% `id`/",
+    exe: '/home/a/.local/bin/claude',
+    flags: ['--add-dir', "/home/a/it's here", '--settings', '{"a": 1}'],
+  })
+  const OPEN: OpenTerminal[] = ['terminal', 'iterm', 'tmux', ...LINUX_TERMINALS]
+
+  test("every terminal's command holds fixed words and the script's path, never the folder", () => {
+    for (const terminal of OPEN) {
+      const argv = terminalArgv(terminal, '/home/a/.claude/session-restore/launch/s9.sh')
+      expect(argv.at(-1)).toBe('/home/a/.claude/session-restore/launch/s9.sh')
+      expect(argv.slice(0, -1).some(part => part.includes('/home/a'))).toBe(false)
+    }
+  })
+
+  test('AppleScript takes the path as its run handler argument and quotes it for the shell', () => {
+    for (const app of ['terminal', 'iterm'] as const) {
+      const lines = appleScript(app)
+      expect(lines[0]).toBe('on run argv')
+      expect(lines.at(-1)).toBe('end run')
+      expect(lines.join('\n')).toContain('"exec /bin/sh " & quoted form of (item 1 of argv)')
+    }
+  })
+
+  test('the script quotes each part, clears the session variables, keeps the config folder, then a login shell', () => {
+    const script = sessionScript(UNIX, 'powershell', { claude: '/usr/local/bin/claude', configDir: '/home/a/.claude' })
+    expect(script.split('\n')).toEqual([
+      "cd '/home/a/r&d x'\\''$(calc)'\\''#(touch pwned); %PATH% `id`' || exit 1",
+      `unset ${SESSION_ENV.join(' ')}`,
+      'export CLAUDE_CONFIG_DIR=/home/a/.claude',
+      "/usr/local/bin/claude --resume s9 --add-dir '/home/a/it'\\''s here' --settings '{\"a\": 1}'",
+      `exec "\${SHELL:-/bin/sh}" -l`,
+      '',
+    ])
+    expect(sessionScript(UNIX, 'none').includes('exec "$')).toBe(false)
+  })
+
+  test('a word is single-quoted unless plain, and the root folder stays a folder', () => {
+    expect(posixQuote('plain-word/with.dots')).toBe('plain-word/with.dots')
+    expect(posixQuote("it's")).toBe("'it'\\''s'")
+    expect(posixQuote('')).toBe("''")
+    expect(cleanDir('/')).toBe('/')
+    expect(cleanDir('/home/a/')).toBe('/home/a')
+  })
+
+  test('the lookup is read back: the process, its start, its path and its arguments past the program', () => {
+    const args = btoa(['/usr/bin/claude', '--model', 'opus', ''].join('\0'))
+    const found = parseLookup(
+      `pid 77\nstarted Wed  Oct 28 10:00:00 2026\nexe64 ${btoa('/usr/bin/claude')}\nargs64 ${args}\n`,
+    )
+    expect(found).toEqual({
+      pid: 77,
+      started: 'Wed Oct 28 10:00:00 2026',
+      exe: '/usr/bin/claude',
+      args: ['--model', 'opus'],
+    })
+    expect(parseLookup('')).toBe(undefined)
+    expect(parseLookup('pid 77\n')).toBe(undefined)
+  })
+
+  test("the listing's start times match the lookup's, a padded day of the month included", () => {
+    const alive = parseLiveness('  77 Wed Oct  8 10:00:00 2026\n 78 b00t:123\n')
+    expect(alive.get(77)).toBe('Wed Oct 8 10:00:00 2026')
+    expect(alive.get(78)).toBe('b00t:123')
+  })
+
+  test('a detached start and the terminal search take their arguments as "$@", never as text', () => {
+    expect(detached(['xterm', '-e', '/bin/sh', '/x.sh'])).toEqual([
+      '/bin/sh',
+      '-c',
+      DETACH,
+      'sh',
+      'xterm',
+      '-e',
+      '/bin/sh',
+      '/x.sh',
+    ])
+    expect(returnsAtOnce('tmux')).toBe(true)
+    expect(returnsAtOnce('x-terminal-emulator')).toBe(false)
+  })
+})
+
+describe('several machines sharing one records folder', () => {
+  test("a record of another machine is judged by its heartbeat, never by this machine's pids", () => {
+    const alive = new Map([
+      [1, 'here|5'],
+      [42, 'here|99'],
+    ])
+    expect(isInterrupted(rec({ pid: 42, pidStarted: 'there|7', lastSeen: NOW - 30_000 }), NOW, alive)).toBe(false)
+    expect(isInterrupted(rec({ pid: 42, pidStarted: 'there|7', lastSeen: NOW - STALE_MS - 1 }), NOW, alive)).toBe(true)
+    // This machine's record whose process is gone is offered at once, as before.
+    expect(isInterrupted(rec({ pid: 43, pidStarted: 'here|7', lastSeen: NOW - 30_000 }), NOW, alive)).toBe(true)
+    expect(machineOf('here|7')).toBe('here')
+    expect(machineOf('2026-10-28T10:00:00.0000000Z')).toBe(undefined)
   })
 })

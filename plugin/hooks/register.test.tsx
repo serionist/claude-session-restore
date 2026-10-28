@@ -23,6 +23,16 @@ type WorldOptions = {
   prompt?: string
   /** The launcher's process fails with this on stderr. */
   launchFails?: string
+  /** Off Windows: what `uname -s` answers, and the variables the terminal is chosen by. */
+  unix?: { name: 'Darwin' | 'Linux'; env?: Record<string, string> }
+  /** Off Windows: the terminal FIND answers, or none. */
+  installed?: string
+  /** Off Windows: what the process lookup prints. */
+  lookup?: string
+  /** Off Windows: the launch that fails, by a word in its script's path (the session's id). */
+  failsFor?: string
+  /** Off Windows: no claude this session can run (a path an update removed). */
+  noClaude?: boolean
 }
 
 /** Answers the session and its files beneath the plugin; what it writes, runs, logs and toasts is kept. */
@@ -45,7 +55,8 @@ function world(on: On, options: WorldOptions = {}) {
     /** What the process listing answers: `<pid> <start time>` lines of the claude processes running. */
     alive: '',
   }
-  mock.env(on, options.windows === false ? { HOME: '/home/test' } : { OS: 'Windows_NT', USERPROFILE: HOME })
+  const unixEnv = { HOME: '/home/test', ...options.unix?.env }
+  mock.env(on, options.windows === false || options.unix ? unixEnv : { OS: 'Windows_NT', USERPROFILE: HOME })
   const clock = mock.clock(on, { now: NOW })
   on('command.register', () => ({ value: { command: 'restore' } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
@@ -75,13 +86,14 @@ function world(on: On, options: WorldOptions = {}) {
   on('fs.exists', () => ({ value: true }))
   on('process.run', (_, e) => {
     ran.push([...e.argv])
+    const done = { isStdoutTruncated: false, isStderrTruncated: false }
+    if (e.argv[0] !== 'powershell.exe') return { value: { ...done, ...unixAnswer(e.argv, options, session.alive) } }
     const script = scriptOf(e.argv)
     if (script.includes('ProcessId=$PID')) lookupsAt.push(clock.now())
     const fails = options.launchFails !== undefined && script.includes('Start-Process')
     const stdout = script.includes("Name like 'claude%'") ? session.alive : ''
-    const done = { stdout, isStdoutTruncated: false, isStderrTruncated: false }
 
-    return { value: { ...done, exitCode: fails ? 1 : 0, stderr: fails ? (options.launchFails ?? '') : '' } }
+    return { value: { ...done, stdout, exitCode: fails ? 1 : 0, stderr: fails ? (options.launchFails ?? '') : '' } }
   })
   on('ui.log', (_, e) => {
     logs.push(e.text)
@@ -93,6 +105,25 @@ function world(on: On, options: WorldOptions = {}) {
   })
 
   return { files, written, ran, logs, toasts, session, clock, lookupsAt }
+}
+
+/** What a process off Windows answers: `uname`, the scripts by what they do, and a terminal's launch. */
+function unixAnswer(argv: readonly string[], options: WorldOptions, alive: string) {
+  const ok = (stdout = '') => ({ exitCode: 0, stdout, stderr: '' })
+  if (argv[0] === 'uname') return ok(options.unix?.name ?? '')
+  const script = argv[0] === '/bin/sh' && argv[1] === '-c' ? (argv[2] ?? '') : ''
+  if (script.includes('command -v "$t"'))
+    return ok(argv.slice(4).includes(options.installed ?? '') ? options.installed : '')
+  if (script === 'command -v claude') return ok(options.noClaude ? '' : '/home/test/.local/bin/claude')
+  if (script === 'test -x "$1"') return options.noClaude ? { exitCode: 1, stdout: '', stderr: '' } : ok()
+  if (script.includes('found_exe')) return ok(options.lookup ?? '')
+  if (script.includes('ps -A -o pid=,lstart=')) return ok(alive)
+  // A launch, which ends with the script's path.
+  if (options.failsFor !== undefined && argv.at(-1)?.includes(options.failsFor)) {
+    return { exitCode: 1, stdout: '', stderr: 'no window' }
+  }
+
+  return ok()
 }
 
 /** The script a `powershell -EncodedCommand` call runs. */
@@ -416,5 +447,279 @@ describe('restoring', () => {
     expect(toasts.at(-1)).toBe('Could not reopen the sessions: see the transcript')
     expect(written.some(one => one.path.endsWith(`${SESSIONS}/cut-1.json`))).toBe(false)
     await band.unmount()
+  })
+})
+
+describe('restoring on macOS and Linux', () => {
+  const RUN = { command: 'restore', args: 'all' }
+  const LINUX = { name: 'Linux', env: { DISPLAY: ':0' } } as const
+  const unixRecord = (id: string, over: Partial<SessionRecord> = {}) =>
+    record(id, {
+      cwd: `/home/test/r&d x'$(calc)'/${id}`,
+      exe: '/home/test/.local/share/claude/versions/2.1.306',
+      ...over,
+    })
+  const scriptOf = (written: readonly Written[], id: string) =>
+    written.find(one => one.path.endsWith(`/session-restore/launch/${id}.sh`))?.text ?? ''
+
+  test('on a Linux desktop, the first terminal installed opens a script that cds and resumes, started apart', async ($, on) => {
+    const { written, ran, clock } = world(on, {
+      unix: LINUX,
+      installed: 'x-terminal-emulator',
+      files: { 'cut-1.json': unixRecord('cut-1') },
+    })
+    await $.session.start(START)
+    await clock.settle()
+
+    const { text } = await $.command.run(RUN as Parameters<typeof $.command.run>[0])
+    await clock.settle()
+
+    expect(text).toBe('Reopened 1 session in x-terminal-emulator.')
+    const script = scriptOf(written, 'cut-1')
+    expect(script.split('\n')[0]).toBe("cd '/home/test/r&d x'\\''$(calc)'\\''/cut-1' || exit 1")
+    expect(script).toContain('/home/test/.local/bin/claude --resume cut-1 --model opus\n')
+    expect(script).toContain(`exec "\${SHELL:-/bin/sh}" -l`)
+    const launch = ran.at(-1) ?? []
+    expect(launch.slice(0, 4)).toEqual(['/bin/sh', '-c', launch[2] ?? '', 'sh'])
+    expect(launch[2]).toContain('setsid -f "$@"')
+    expect(launch.slice(4, 7)).toEqual(['x-terminal-emulator', '-e', '/bin/sh'])
+    expect(launch.at(-1)?.endsWith('/session-restore/launch/cut-1.sh')).toBe(true)
+    expect(launch.some(part => part.includes('r&d'))).toBe(false)
+    expect(lastWrite(written, 'cut-1').status).toBe('restored')
+  })
+
+  test('inside tmux, a new tmux window, with no folder flag tmux would read as a format', async ($, on) => {
+    const { ran, clock } = world(on, {
+      unix: { name: 'Linux', env: { TMUX: '/tmp/tmux-1/default,1,0' } },
+      files: { 'cut-1.json': unixRecord('cut-1') },
+    })
+    await $.session.start(START)
+    await clock.settle()
+
+    await $.command.run(RUN as Parameters<typeof $.command.run>[0])
+
+    const launch = ran.at(-1) ?? []
+    expect(launch.slice(0, 3)).toEqual(['tmux', 'new-window', '/bin/sh'])
+    expect(launch.length).toBe(4)
+  })
+
+  test('on macOS, Terminal, or iTerm2 when this session runs in it; the script path reaches AppleScript as argv', async ($, on) => {
+    const { ran, clock } = world(on, {
+      unix: { name: 'Darwin', env: { TERM_PROGRAM: 'iTerm.app' } },
+      files: { 'cut-1.json': unixRecord('cut-1') },
+    })
+    await $.session.start(START)
+    await clock.settle()
+
+    const { text } = await $.command.run(RUN as Parameters<typeof $.command.run>[0])
+
+    expect(text).toBe('Reopened 1 session in iTerm2.')
+    const launch = ran.at(-1) ?? []
+    expect(launch[0]).toBe('osascript')
+    expect(launch).toContain('tell application "iTerm2"')
+    expect(launch.slice(0, -1).some(part => part.includes('cut-1') || part.includes('r&d'))).toBe(false)
+  })
+
+  test('over SSH, or with no display, the commands are printed and nothing is marked', async ($, on) => {
+    const { written, clock } = world(on, {
+      unix: { name: 'Linux', env: { DISPLAY: ':0', SSH_CONNECTION: '10.0.0.2 50000 10.0.0.1 22' } },
+      files: { 'cut-1.json': unixRecord('cut-1') },
+    })
+    await $.session.start(START)
+    await clock.settle()
+
+    const { text } = await $.command.run(RUN as Parameters<typeof $.command.run>[0])
+
+    expect((text ?? '').split('\n').slice(0, 2)).toEqual([
+      'No terminal opened: this session runs over SSH, and a window would open on the other machine.',
+      'Run these to reopen them:',
+    ])
+    expect(written.some(one => one.path.endsWith(`${SESSIONS}/cut-1.json`))).toBe(false)
+  })
+
+  test('the terminal option print prints the commands', { options: { terminal: 'print' } }, async ($, on) => {
+    const { clock } = world(on, { unix: LINUX, installed: 'xterm', files: { 'cut-1.json': unixRecord('cut-1') } })
+    await $.session.start(START)
+    await clock.settle()
+
+    const { text } = await $.command.run(RUN as Parameters<typeof $.command.run>[0])
+
+    expect((text ?? '').split('\n')[0]).toBe('No terminal opened: the terminal option is print.')
+  })
+
+  test(
+    'a terminal the option names but this system lacks prints the commands and says why',
+    { options: { terminal: 'iterm' } },
+    async ($, on) => {
+      const { clock } = world(on, { unix: LINUX, files: { 'cut-1.json': unixRecord('cut-1') } })
+      await $.session.start(START)
+      await clock.settle()
+
+      const { text } = await $.command.run(RUN as Parameters<typeof $.command.run>[0])
+
+      expect((text ?? '').split('\n')[0]).toBe('No terminal opened: iTerm2 runs only on macOS.')
+    },
+  )
+
+  test('each session is marked once its own window opened; one that failed is named with its command', async ($, on) => {
+    const { written, toasts, clock } = world(on, {
+      unix: LINUX,
+      installed: 'xterm',
+      files: { 'cut-1.json': unixRecord('cut-1'), 'cut-2.json': unixRecord('cut-2') },
+      failsFor: 'cut-2',
+    })
+    await $.session.start(START)
+    await clock.settle()
+
+    const { text } = await $.command.run(RUN as Parameters<typeof $.command.run>[0])
+
+    expect(lastWrite(written, 'cut-1').status).toBe('restored')
+    expect(written.some(one => one.path.endsWith(`${SESSIONS}/cut-2.json`))).toBe(false)
+    expect(text).toContain('Reopened 1 session in xterm.')
+    expect(text).toContain('Could not open xterm for "cut-2": exit 1: no window')
+    expect(text).toContain("  Run: cd '/home/test/r&d x'\\''$(calc)'\\''/cut-2' && claude --resume cut-2 --model opus")
+    expect(toasts).toContain('Could not reopen some sessions: see the transcript')
+  })
+
+  test('the restoring session keeps its config folder in the window, so --resume finds the session', async ($, on) => {
+    const { written, clock } = world(on, {
+      unix: { name: 'Linux', env: { DISPLAY: ':0', CLAUDE_CONFIG_DIR: "/home/test/.claude work's" } },
+      installed: 'xterm',
+      files: { 'cut-1.json': unixRecord('cut-1') },
+    })
+    await $.session.start(START)
+    await clock.settle()
+
+    await $.command.run(RUN as Parameters<typeof $.command.run>[0])
+
+    expect(scriptOf(written, 'cut-1')).toContain("export CLAUDE_CONFIG_DIR='/home/test/.claude work'\\''s'")
+  })
+
+  test('the lookup off Windows records the process, its start and, on Linux, its flags', async ($, on) => {
+    const args = btoa(['/home/test/.local/bin/claude', '--model', 'opus', 'fix it', ''].join('\0'))
+    const lookup = `pid 4242\nstarted b00t:123\nexe64 ${btoa('/home/test/.local/share/claude/versions/2.1.306')}\nargs64 ${args}\n`
+    const { written, clock } = world(on, { unix: LINUX, lookup })
+    await $.session.start(START)
+    await clock.settle()
+
+    const own = lastWrite(written, 'own-session')
+    expect(own.pid).toBe(4242)
+    expect(own.pidStarted).toBe('b00t:123')
+    expect(own.flags).toEqual(['--model', 'opus'])
+  })
+
+  test('a session whose process still runs is not offered off Windows, asleep or not', async ($, on) => {
+    const live = unixRecord('cut-1', { status: 'open', pid: 42, pidStarted: 'b00t:7', lastSeen: NOW - 30 * MINUTE })
+    const { session, clock } = world(on, { unix: LINUX, files: { 'cut-1.json': live } })
+    session.alive = '42 b00t:7\n43 b00t:9\n'
+    await $.session.start(START)
+    await clock.settle()
+
+    const { text } = await $.command.run({ command: 'restore', args: '' } as Parameters<typeof $.command.run>[0])
+
+    expect(text).toBe('No interrupted sessions.')
+  })
+})
+
+describe('choosing where a session opens, off Windows', () => {
+  const RUN = { command: 'restore', args: 'all' }
+  const unixRecord = (id: string, over: Partial<SessionRecord> = {}) =>
+    record(id, { cwd: `/home/test/${id}`, exe: '/home/test/.local/share/claude/versions/2.1.306', ...over })
+
+  test('Linux with no display and no SSH prints the commands: there is no display', async ($, on) => {
+    const { clock } = world(on, {
+      unix: { name: 'Linux' },
+      installed: 'xterm',
+      files: { 'cut-1.json': unixRecord('cut-1') },
+    })
+    await $.session.start(START)
+    await clock.settle()
+
+    const { text } = await $.command.run(RUN as Parameters<typeof $.command.run>[0])
+
+    expect((text ?? '').split('\n')[0]).toBe('No terminal opened: there is no display.')
+  })
+
+  test('a terminal the option names needs a display too', { options: { terminal: 'xterm' } }, async ($, on) => {
+    const { written, clock } = world(on, {
+      unix: { name: 'Linux', env: { SSH_CONNECTION: '10.0.0.2 50000 10.0.0.1 22' } },
+      installed: 'xterm',
+      files: { 'cut-1.json': unixRecord('cut-1') },
+    })
+    await $.session.start(START)
+    await clock.settle()
+
+    const { text } = await $.command.run(RUN as Parameters<typeof $.command.run>[0])
+
+    expect((text ?? '').split('\n')[0]).toBe('No terminal opened: there is no display.')
+    expect(written.some(one => one.path.endsWith(`${SESSIONS}/cut-1.json`))).toBe(false)
+  })
+
+  test('a terminal the option names but not installed says so', { options: { terminal: 'xterm' } }, async ($, on) => {
+    const { clock } = world(on, {
+      unix: { name: 'Linux', env: { DISPLAY: ':0' } },
+      installed: 'kitty',
+      files: { 'cut-1.json': unixRecord('cut-1') },
+    })
+    await $.session.start(START)
+    await clock.settle()
+
+    const { text } = await $.command.run(RUN as Parameters<typeof $.command.run>[0])
+
+    expect((text ?? '').split('\n')[0]).toBe('No terminal opened: xterm is not installed.')
+  })
+
+  test('inside tmux over SSH, tmux opens the window: it runs on the machine the person is on', async ($, on) => {
+    const env = { TMUX: '/tmp/tmux-1/default,1,0', SSH_CONNECTION: '10.0.0.2 50000 10.0.0.1 22' }
+    const { ran, clock } = world(on, { unix: { name: 'Linux', env }, files: { 'cut-1.json': unixRecord('cut-1') } })
+    await $.session.start(START)
+    await clock.settle()
+
+    await $.command.run(RUN as Parameters<typeof $.command.run>[0])
+
+    expect((ran.at(-1) ?? []).slice(0, 2)).toEqual(['tmux', 'new-window'])
+  })
+
+  test('on macOS, iTerm2 is known by LC_TERMINAL too, which survives tmux and SSH', async ($, on) => {
+    const { ran, clock } = world(on, {
+      unix: { name: 'Darwin', env: { LC_TERMINAL: 'iTerm2' } },
+      files: { 'cut-1.json': unixRecord('cut-1') },
+    })
+    await $.session.start(START)
+    await clock.settle()
+
+    await $.command.run(RUN as Parameters<typeof $.command.run>[0])
+
+    expect(ran.at(-1)).toContain('tell application "iTerm2"')
+  })
+
+  test('a session whose claude no longer runs is printed, not opened and not marked', async ($, on) => {
+    const { written, ran, clock } = world(on, {
+      unix: { name: 'Linux', env: { DISPLAY: ':0' } },
+      installed: 'xterm',
+      noClaude: true,
+      files: { 'cut-1.json': unixRecord('cut-1') },
+    })
+    await $.session.start(START)
+    await clock.settle()
+
+    const { text } = await $.command.run(RUN as Parameters<typeof $.command.run>[0])
+
+    expect(text).toContain('Could not open "cut-1": no claude this session can run')
+    expect(text).toContain('  Run: cd /home/test/cut-1 && claude --resume cut-1 --model opus')
+    expect(ran.some(argv => argv.at(-1)?.endsWith('.sh'))).toBe(false)
+    expect(written.some(one => one.path.endsWith(`${SESSIONS}/cut-1.json`))).toBe(false)
+  })
+
+  test('an empty process listing is no listing: a session is then judged by its heartbeat', async ($, on) => {
+    const quiet = unixRecord('cut-1', { status: 'open', pid: 42, pidStarted: 'm|7', lastSeen: NOW - 30_000 })
+    const { session, clock } = world(on, { unix: { name: 'Linux' }, files: { 'cut-1.json': quiet } })
+    session.alive = ''
+    await $.session.start(START)
+    await clock.settle()
+
+    const { text } = await $.command.run({ command: 'restore', args: '' } as Parameters<typeof $.command.run>[0])
+
+    expect(text).toBe('No interrupted sessions.')
   })
 })

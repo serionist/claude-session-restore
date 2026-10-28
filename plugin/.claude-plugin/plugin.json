@@ -15,9 +15,30 @@
     "shell": {
       "type": "string",
       "title": "Shell for restored tabs",
-      "description": "What each restored tab leaves you in when claude exits. none closes the tab with claude.",
+      "description": "What each restored tab leaves you in when claude exits. none closes the tab with claude. On macOS and Linux, any value but none leaves your login shell.",
       "default": "powershell",
       "options": ["powershell", "pwsh", "cmd", "none"]
+    },
+    "terminal": {
+      "type": "string",
+      "title": "Terminal for restored sessions (macOS, Linux)",
+      "description": "auto: tmux inside tmux, Terminal or iTerm2 on macOS, the first installed desktop terminal on Linux. print: show the commands instead. Windows always uses Windows Terminal.",
+      "default": "auto",
+      "options": [
+        "auto",
+        "terminal",
+        "iterm",
+        "tmux",
+        "x-terminal-emulator",
+        "gnome-terminal",
+        "ptyxis",
+        "konsole",
+        "kitty",
+        "wezterm",
+        "alacritty",
+        "xterm",
+        "print"
+      ]
     }
   }
 }

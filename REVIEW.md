@@ -42,7 +42,8 @@ Each is a yes or no; a "no" is a finding.
 4. For a change a test can't reach (a restore, the band, the pane, a real process lookup): does the PR say how it was
    tried by hand, on which Windows and Claude Code version, and what it could not show?
 5. Does a record's text (a folder, a flag, a title, the claude path) reach PowerShell only as base64, Windows Terminal
-   and `Start-Process` only through `crtQuote`, and cmd never (`docs/design.md`)?
+   and `Start-Process` only through `crtQuote`, `sh` only single-quoted (`posixQuote`), tmux, AppleScript and the
+   Linux terminals only as the script's path in an argument of its own, and cmd never (`docs/design.md`)?
 6. Does the plugin still do nothing unasked: no restore, no terminal, no record dismissed without the person's click
    or command? Does a session's record stay on this machine?
 7. Can a newer version read every record an older one wrote, and an older one ignore what a newer one adds?

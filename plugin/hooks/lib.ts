@@ -12,8 +12,18 @@ export const WT_WINDOW = 'claude-restore'
 
 export type Shell = 'powershell' | 'pwsh' | 'cmd' | 'none'
 
-/** Running claude processes: pid to process start time (ISO, UTC). */
+/**
+ * Running processes: pid to start. On Windows the start time (ISO, UTC); on macOS and Linux `<machine>|<start>`,
+ * where the machine (a boot, and on Linux a pid namespace) tells apart a record of another machine sharing the folder.
+ */
 export type Liveness = ReadonlyMap<number, string>
+
+/** The machine a start names, `<machine>|...`; undefined for a start that names none (Windows). */
+export function machineOf(started: string): string | undefined {
+  const bar = started.indexOf('|')
+
+  return bar < 0 ? undefined : started.slice(0, bar)
+}
 
 /**
  * `other` is a signal (SIGHUP when the terminal closes, SIGTERM at
@@ -33,7 +43,11 @@ export function isInterrupted(rec: SessionRecord, now: number, alive: Liveness |
   if (rec.status === 'interrupted') return true
   if (rec.status !== 'open') return false
   if (alive !== null && rec.pid !== undefined && rec.pidStarted !== undefined) {
-    return alive.get(rec.pid) !== rec.pidStarted
+    // A record from another machine sharing the folder (an NFS home, a container mounting ~/.claude): its pid means
+    // nothing in this listing, so its heartbeat decides.
+    const machine = machineOf(rec.pidStarted)
+    const here = machine === undefined || [...alive.values()].some(started => machineOf(started) === machine)
+    if (here) return alive.get(rec.pid) !== rec.pidStarted
   }
 
   return now - rec.lastSeen > STALE_MS
@@ -211,7 +225,9 @@ export function tabArgv(rec: SessionRecord, shell: Shell): string[] {
 
 /** A drive root keeps its slash; any other folder loses a trailing one. */
 export function cleanDir(dir: string): string {
-  return /^[A-Za-z]:[\\/]$/.test(dir) ? dir : dir.replace(/[\\/]+$/, '')
+  if (/^[A-Za-z]:[\\/]$/.test(dir)) return dir
+  // `/` alone stays: without it, the root would become no folder at all.
+  return dir.replace(/[\\/]+$/, '') || dir
 }
 
 export function folderName(dir: string): string {
@@ -328,13 +344,6 @@ export function launchScript(planPath: string): string {
   ].join('\n')
 }
 
-/** What to type by hand where this mod cannot open a terminal itself. */
-export function manualCommand(rec: SessionRecord): string {
-  const quote = (s: string) => (/^[\w./:@=-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`)
-
-  return `cd ${quote(rec.cwd)} && ${['claude', ...claudeArgv(rec).slice(1)].map(quote).join(' ')}`
-}
-
 export function labelOf(rec: SessionRecord): string {
   return rec.title ?? folderName(rec.cwd)
 }
@@ -360,15 +369,20 @@ export function ago(ms: number): string {
   return `${Math.round(hours / 24)} d ago`
 }
 
-/** Parses `<pid> <start time>` lines into Liveness. */
+/** Parses `<pid> <start time>` lines into Liveness; a start time may hold spaces, as `ps` writes it off Windows. */
 export function parseLiveness(stdout: string): Map<number, string> {
   const alive = new Map<number, string>()
   for (const line of stdout.split(/\r?\n/)) {
-    const [pid, started] = line.trim().split(' ')
-    if (pid && started) alive.set(Number(pid), started)
+    const match = /^(\d+)\s+(.+)$/.exec(line.trim())
+    if (match?.[1] !== undefined && match[2] !== undefined) alive.set(Number(match[1]), squeeze(match[2]))
   }
 
   return alive
+}
+
+/** Runs of spaces as one: `ps` pads a day of the month, and two listings must agree to the character. */
+export function squeeze(text: string): string {
+  return text.trim().split(/\s+/).join(' ')
 }
 
 const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
@@ -400,4 +414,281 @@ function base64(bytes: ArrayLike<number>): string {
   }
 
   return out
+}
+
+// macOS and Linux: the script a restored window runs, the terminals that open it, and the process lookup. A folder,
+// a flag or a path reaches a shell only single-quoted (posixQuote) inside the script, and the script's path reaches
+// each terminal as an argument of its own, AppleScript only through its run handler's argument. No terminal gets the
+// folder: tmux reads `-c` as a format, where `#(...)` runs a command, and the script's own `cd` sets it anyway.
+
+/**
+ * A word as a POSIX shell reads it back whole: a plain word as it is, any other single-quoted, `'` written `'\''`.
+ * Nothing else is special inside single quotes.
+ */
+export function posixQuote(word: string): string {
+  return /^[\w./:@=-]+$/.test(word) ? word : `'${word.replace(/'/g, `'\\''`)}'`
+}
+
+/** What to type by hand where this plugin opens no terminal itself. */
+export function manualCommand(rec: SessionRecord): string {
+  return `cd ${posixQuote(rec.cwd)} && ${['claude', ...claudeArgv(rec).slice(1)].map(posixQuote).join(' ')}`
+}
+
+/** Where a restored session opens off Windows: a terminal the plugin drives, or the commands printed. */
+export type Terminal =
+  | 'auto'
+  | 'terminal'
+  | 'iterm'
+  | 'tmux'
+  | 'x-terminal-emulator'
+  | 'gnome-terminal'
+  | 'ptyxis'
+  | 'konsole'
+  | 'kitty'
+  | 'wezterm'
+  | 'alacritty'
+  | 'xterm'
+  | 'print'
+
+/** A terminal the plugin opens a window in. */
+export type OpenTerminal = Exclude<Terminal, 'auto' | 'print'>
+
+/**
+ * The desktop terminals tried on Linux, in this order: Debian's and Ubuntu's own choice first, then GNOME's two (Ptyxis
+ * on Ubuntu 25.10 and Fedora 41 and later), KDE's, and the common ones.
+ */
+export const LINUX_TERMINALS: readonly OpenTerminal[] = [
+  'x-terminal-emulator',
+  'gnome-terminal',
+  'ptyxis',
+  'konsole',
+  'kitty',
+  'wezterm',
+  'alacritty',
+  'xterm',
+]
+
+/** Every value of the `terminal` option, as plugin.json lists them. */
+export const TERMINALS: readonly Terminal[] = ['auto', 'terminal', 'iterm', 'tmux', ...LINUX_TERMINALS, 'print']
+
+/** How each terminal is named to the person. */
+export function terminalName(terminal: OpenTerminal): string {
+  return terminal === 'terminal' ? 'Terminal' : terminal === 'iterm' ? 'iTerm2' : terminal
+}
+
+/** What the restoring session knows that a new window doesn't: the claude it runs, and its config folder. */
+export type ScriptEnv = { claude?: string; configDir?: string }
+
+/**
+ * The script a restored window runs off Windows, as `/bin/sh <script>`: into the session's folder, the session
+ * variables cleared (a claude that sees them runs as a child session, with no transcript), the restoring session's
+ * config folder kept (else `--resume` looks in `~/.claude` and finds nothing), claude, then the person's login shell
+ * unless the shell option is none. The claude is the one on the restoring session's PATH, not the versioned file a
+ * lookup finds, which an update replaces.
+ */
+export function sessionScript(rec: SessionRecord, shell: Shell, env: ScriptEnv = {}): string {
+  const argv = claudeArgv(env.claude === undefined ? rec : { ...rec, exe: env.claude })
+
+  return [
+    `cd ${posixQuote(cleanDir(rec.cwd))} || exit 1`,
+    `unset ${SESSION_ENV.join(' ')}`,
+    ...(env.configDir === undefined ? [] : [`export CLAUDE_CONFIG_DIR=${posixQuote(env.configDir)}`]),
+    argv.map(posixQuote).join(' '),
+    ...(shell === 'none' ? [] : [`exec "\${SHELL:-/bin/sh}" -l`]),
+    '',
+  ].join('\n')
+}
+
+/**
+ * The AppleScript that opens a window running `exec /bin/sh <script>`, the script's path given as the run handler's
+ * argument: it never enters the source, and `quoted form of` single-quotes it for the shell the window starts.
+ */
+export function appleScript(app: 'terminal' | 'iterm'): string[] {
+  const command = '"exec /bin/sh " & quoted form of (item 1 of argv)'
+  const body =
+    app === 'terminal'
+      ? ['tell application "Terminal"', 'activate', `do script ${command}`, 'end tell']
+      : [
+          'tell application "iTerm2"',
+          'activate',
+          'set restored to (create window with default profile)',
+          `tell current session of restored to write text ${command}`,
+          'end tell',
+        ]
+
+  return ['on run argv', ...body, 'end run']
+}
+
+/** The process that opens a window running `/bin/sh <script>`: fixed words, and the script's path as one argument. */
+export function terminalArgv(terminal: OpenTerminal, script: string): string[] {
+  switch (terminal) {
+    case 'terminal':
+    case 'iterm':
+      return ['osascript', ...appleScript(terminal).flatMap(line => ['-e', line]), script]
+    case 'tmux':
+      return ['tmux', 'new-window', '/bin/sh', script]
+    case 'x-terminal-emulator':
+      return ['x-terminal-emulator', '-e', '/bin/sh', script]
+    case 'gnome-terminal':
+      return ['gnome-terminal', '--', '/bin/sh', script]
+    case 'ptyxis':
+      return ['ptyxis', '--new-window', '--', '/bin/sh', script]
+    case 'konsole':
+      return ['konsole', '-e', '/bin/sh', script]
+    case 'kitty':
+      return ['kitty', '/bin/sh', script]
+    case 'wezterm':
+      return ['wezterm', 'start', '--', '/bin/sh', script]
+    case 'alacritty':
+      return ['alacritty', '-e', '/bin/sh', script]
+    case 'xterm':
+      return ['xterm', '-e', '/bin/sh', script]
+  }
+}
+
+/** Terminals whose command returns once the window is open, and says when it could not open it. */
+export function returnsAtOnce(terminal: OpenTerminal): boolean {
+  return terminal === 'terminal' || terminal === 'iterm' || terminal === 'tmux'
+}
+
+/**
+ * Runs its arguments as a program apart from this process and its session, its output nowhere, and returns at once:
+ * the desktop terminals run until their window closes (Debian's x-terminal-emulator waits on purpose), and a call
+ * held past its time is killed, the restored claude with it. `setsid -f`, else `nohup ... &` where there is no setsid
+ * or it has no `-f` (busybox). The program and its arguments arrive as "$@", never as text the shell reads.
+ */
+export const DETACH =
+  'if command -v setsid >/dev/null 2>&1 && setsid -f "$@" </dev/null >/dev/null 2>&1; then :; ' +
+  'else nohup "$@" </dev/null >/dev/null 2>&1 & fi'
+
+export function detached(argv: readonly string[]): string[] {
+  return ['/bin/sh', '-c', DETACH, 'sh', ...argv]
+}
+
+/** Prints the first of its arguments that is a command on PATH. */
+export const FIND = 'for t in "$@"; do if command -v "$t" >/dev/null 2>&1; then echo "$t"; exit 0; fi; done'
+
+/** Prints the path of the claude on PATH. */
+export const WHICH_CLAUDE = 'command -v claude'
+
+/** Succeeds when its argument is a program this session can run. */
+export const RUNNABLE = 'test -x "$1"'
+
+/**
+ * Shell functions the lookup and the listing share. A start is `<machine>|<start>`: the machine is the boot and, on
+ * Linux, the pid namespace, so a record of another machine sharing the folder (an NFS home, a container mounting
+ * ~/.claude) is never judged by this one's pids. On Linux the start is the tick the process started at, from /proc:
+ * `ps` derives its start time from the wall clock, so a clock stepped after a laptop wakes would make every running
+ * session look gone. On macOS it is `ps`'s start time in UTC, which macOS stores as it was. On Linux nothing here
+ * needs `ps`, which slim containers lack.
+ */
+const SHARED = [
+  'machine() {',
+  '  if [ -r /proc/sys/kernel/random/boot_id ]; then',
+  '    read -r boot < /proc/sys/kernel/random/boot_id',
+  '    echo "$boot/$(readlink /proc/self/ns/pid 2>/dev/null)"',
+  '  else',
+  '    sysctl -n kern.bootsessionuuid 2>/dev/null',
+  '  fi',
+  '}',
+  // The fields of /proc/<pid>/stat after the command's name, field 2, which may hold spaces and parentheses: the
+  // fields are counted after its last `) `. `shift` is a special builtin, whose failure would end the script. The
+  // field's number is kept first, since `set --` replaces the function's own arguments.
+  'field() {',
+  '  n=$1',
+  '  set -f',
+  `  set -- \${2##*) }`,
+  '  set +f',
+  '  if [ "$#" -ge "$n" ]; then shift $((n - 1)); echo "$1"; fi',
+  '}',
+  'started() {',
+  '  if read -r stat 2>/dev/null < "/proc/$1/stat"; then',
+  '    t=$(field 20 "$stat")',
+  '    if [ -n "$t" ]; then echo "$(machine)|$t"; fi',
+  '  else',
+  '    echo "$(machine)|$(TZ=UTC0 LC_ALL=C ps -o lstart= -p "$1")"',
+  '  fi',
+  '}',
+  'parent() {',
+  '  if read -r stat 2>/dev/null < "/proc/$1/stat"; then field 2 "$stat"; else ps -o ppid= -p "$1" 2>/dev/null; fi',
+  '}',
+].join('\n')
+
+/**
+ * Finds this session's claude process off Windows, run as `sh -c LOOKUP sh <records folder> <scripts folder>`: walks
+ * up from its own pid to the nearest ancestor that is claude (named claude, or a file under `claude/versions/`, where
+ * the native installer keeps each version), on through any claude above it, and prints its pid, its start, its path
+ * and, where /proc has them, its exact arguments, the last two in base64. Then prunes the records and the scripts
+ * untouched for 14 days, the folders given as arguments, never written into the script.
+ */
+export const LOOKUP = [
+  SHARED,
+  'p=$$',
+  'found=',
+  'i=0',
+  'while [ "$i" -lt 16 ]; do',
+  '  i=$((i + 1))',
+  '  p=$(parent "$p" | tr -d " ")',
+  '  case "$p" in ""|0|1) break ;; esac',
+  '  if [ -r "/proc/$p/exe" ]; then exe=$(readlink "/proc/$p/exe"); else exe=$(ps -o comm= -p "$p"); fi',
+  '  case "$exe" in',
+  '    claude|*/claude|*/claude/versions/*) found=$p; found_exe=$exe ;;',
+  '    *) if [ -n "$found" ]; then break; fi ;;',
+  '  esac',
+  'done',
+  'if [ -n "$found" ]; then',
+  '  echo "pid $found"',
+  '  echo "started $(started "$found")"',
+  '  printf "exe64 %s\\n" "$(printf %s "$found_exe" | base64 | tr -d "\\n")"',
+  '  if [ -r "/proc/$found/cmdline" ]; then',
+  '    printf "args64 %s\\n" "$(base64 < "/proc/$found/cmdline" | tr -d "\\n")"',
+  '  fi',
+  'fi',
+  'find "$1" -name "*.json" -mtime +14 -exec rm -f {} + 2>/dev/null',
+  'find "$2" -name "*.sh" -mtime +14 -exec rm -f {} + 2>/dev/null',
+  'exit 0',
+].join('\n')
+
+/** Every running process, `<pid> <machine>|<start>`, as LOOKUP writes a start. */
+export const PROCESSES = [
+  SHARED,
+  'm=$(machine)',
+  'if [ -r /proc/sys/kernel/random/boot_id ]; then',
+  // No subshell per process: a busy machine runs hundreds, and the listing runs at every scan.
+  '  for d in /proc/[0-9]*; do',
+  '    read -r stat 2>/dev/null < "$d/stat" || continue',
+  '    set -f',
+  `    set -- \${stat##*) }`,
+  '    set +f',
+  `    if [ "$#" -ge 20 ]; then shift 19; echo "\${d#/proc/} $m|$1"; fi`,
+  '  done',
+  'else',
+  '  TZ=UTC0 LC_ALL=C ps -A -o pid=,lstart= | while read -r pid rest; do echo "$pid $m|$rest"; done',
+  'fi',
+  'exit 0',
+].join('\n')
+
+/** What LOOKUP found: the claude process, its start time, its path and, on Linux, its arguments past the program. */
+export type Lookup = { pid: number; started: string; exe?: string; args?: string[] }
+
+/** Reads LOOKUP's output; undefined when it found no claude. */
+export function parseLookup(stdout: string): Lookup | undefined {
+  const fields = new Map<string, string>()
+  for (const line of stdout.split(/\r?\n/)) {
+    const match = /^(\w+) (.*)$/.exec(line.trim())
+    if (match?.[1] !== undefined && match[2] !== undefined) fields.set(match[1], match[2])
+  }
+  const pid = Number(fields.get('pid'))
+  const started = squeeze(fields.get('started') ?? '')
+  if (!Number.isInteger(pid) || pid <= 0 || started === '') return undefined
+  const exe64 = fields.get('exe64')
+  const args64 = fields.get('args64')
+  // /proc's arguments each end with a NUL, the program first.
+  const args = args64 === undefined ? undefined : utf8(args64).split('\0').slice(1, -1)
+
+  return { pid, started, exe: exe64 ? utf8(exe64) : undefined, args }
+}
+
+function utf8(base64: string): string {
+  return new TextDecoder().decode(Uint8Array.from(atob(base64), c => c.charCodeAt(0)))
 }

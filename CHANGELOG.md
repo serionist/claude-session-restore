@@ -6,6 +6,16 @@ in the same PR; `docs/releasing.md` says how a release dates it.
 
 ## Unreleased
 
+### Added
+
+- Restore opens the sessions in a terminal on macOS and Linux too (#11): Terminal, or iTerm2 when you restore from it,
+  on macOS; on Linux the first installed of `x-terminal-emulator`, `gnome-terminal`, `ptyxis`, `konsole`, `kitty`,
+  `wezterm`, `alacritty` and `xterm`; a new tmux window inside tmux. Over SSH, or with no display, the commands are
+  printed, with why.
+- The `terminal` option (macOS, Linux): `auto`, a terminal by name, or `print`.
+- On macOS and Linux, each session's claude process is looked up, so a session still running is never offered, a
+  laptop asleep included; on Linux, a restored session gets its flags back.
+
 ## 0.1.1 (2026-10-28)
 
 ### Fixed
