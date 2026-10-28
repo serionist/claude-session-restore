@@ -5,7 +5,7 @@
 
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, describe, test } from 'node:test'
@@ -45,8 +45,9 @@ const HOSTILE = [
 
 const folder = mkdtempSync(join(tmpdir(), 'launcher-test-'))
 // A session's folder, as hostile as Windows allows: the tab script must start the program in it.
-const sessionDir = join(folder, 'R&D x’$(calc)’; [old] 100%')
-mkdirSync(sessionDir)
+mkdirSync(join(folder, 'R&D x’$(calc)’; [old] 100%'))
+// Its long path: a temp folder may be an 8.3 short one (C:\Users\RUNNER~1 on CI), and PowerShell names it the long way.
+const sessionDir = realpathSync.native(join(folder, 'R&D x’$(calc)’; [old] 100%'))
 const echo = join(folder, 'echo.cjs')
 writeFileSync(
   echo,

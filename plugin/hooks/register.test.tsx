@@ -8,7 +8,8 @@ import type { SessionRecord } from '../types'
 
 const NOW = 1_800_000_000_000
 const HOME = 'C:\\Users\\test'
-const SESSIONS = 'C:/Users/test/.claude/session-restore/sessions'
+// Matched by its end: off Windows, the engine takes this home for a relative path and writes beneath its own folder.
+const SESSIONS = '/.claude/session-restore/sessions'
 
 type Written = { path: string; text: string }
 
@@ -60,7 +61,7 @@ describe('the hooks', () => {
     await $.session.start({ cwd: 'D:\\work\\app', surface: 'terminal', isInteractive: true })
     await clock.settle()
 
-    const own = written.filter(one => one.path === `${SESSIONS}/own-session.json`).at(-1)
+    const own = written.filter(one => one.path.endsWith(`${SESSIONS}/own-session.json`)).at(-1)
     const rec = JSON.parse(own?.text ?? '{}') as SessionRecord
     expect(rec.cwd).toBe('D:\\work\\app')
     expect(rec.status).toBe('open')
@@ -87,13 +88,13 @@ describe('the hooks', () => {
     await clock.settle()
 
     expect(text).toBe('Reopened 1 session in Windows Terminal.')
-    const plan = written.find(one => one.path === 'C:/Users/test/.claude/session-restore/launch.json')
+    const plan = written.find(one => one.path.endsWith('/.claude/session-restore/launch.json'))
     expect(JSON.parse(plan?.text ?? '{}').wt.length).toBe(1)
     const launcher = scriptOf(ran.at(-1) ?? [])
     expect(launcher.split('\n')[0]).toContain('[Console]::OutputEncoding')
     expect(launcher).toContain('Get-Content -Raw -Encoding UTF8 -LiteralPath')
     expect(launcher.includes('R&D')).toBe(false)
-    const restored = written.filter(one => one.path === `${SESSIONS}/cut-1.json`).at(-1)
+    const restored = written.filter(one => one.path.endsWith(`${SESSIONS}/cut-1.json`)).at(-1)
     expect(JSON.parse(restored?.text ?? '{}').status).toBe('restored')
   })
 })
