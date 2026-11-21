@@ -2,14 +2,17 @@ import type { EngineInterface, Register } from 'claude-code'
 import { atom, read, update } from 'claude-code'
 
 import type { SessionRecord } from '../types'
-import type { Liveness, OpenTerminal, Shell, Terminal } from './lib'
+import type { Autostart, Liveness, OpenTerminal, Shell, Terminal } from './lib'
 import {
+  AUTOSTART_FILE,
   ago,
+  autostartFile,
   detached,
   encodePowerShell,
   FIND,
   HEARTBEAT_MS,
   isInterrupted,
+  isRunning,
   LINUX_TERMINALS,
   LOOKUP,
   LOOKUP_TRIES,
@@ -17,6 +20,7 @@ import {
   launchPlan,
   launchScript,
   manualCommand,
+  nameFromTranscript,
   PROCESSES,
   parseLiveness,
   parseLookup,
@@ -31,6 +35,7 @@ import {
   terminalArgv,
   terminalName,
   titleFromPrompt,
+  transcriptPath,
   UTF8_OUTPUT,
   WHICH_CLAUDE,
 } from './lib'
@@ -45,6 +50,8 @@ type Ctx = {
   shell: Shell
   /** Where a restore opens off Windows (the `terminal` option). */
   terminal: Terminal
+  /** What the session Windows starts at logon does (the `autostart` option). */
+  autostart: Autostart
   dir: string | null
   platform: Platform
   isWindows: boolean
@@ -62,12 +69,15 @@ type Ctx = {
   beats: number
   /** The restore or dismiss running now; the next waits for it. */
   acting: Promise<void>
-  /** The turn count at which the messages were last read for a title. */
+  /** The turn count at which the messages were last read for a title, and the transcript for a name. */
   titleTurns: number
 }
 
 const PANE = 'interrupted-sessions'
 const SHELLS: readonly Shell[] = ['powershell', 'pwsh', 'cmd', 'none']
+const AUTOSTARTS: readonly Autostart[] = ['off', 'ask', 'all']
+/** Rows `/sessions` lists at most; a filter finds the older ones. */
+const SESSIONS_SHOWN = 30
 const interrupted = atom({ plugin: 'session-restore', key: 'interrupted' } as const, [])
 
 function plural(n: number, word: string): string {
@@ -134,6 +144,15 @@ async function firstPrompt($: Engine): Promise<string | undefined> {
   return first === undefined ? undefined : titleFromPrompt(first.text)
 }
 
+/** The name `/rename` or Claude Code gave the session, from its transcript; none where it can't be read. */
+async function transcriptName($: Engine, ctx: Ctx, cwd: string, id: string): Promise<string | undefined> {
+  const config = home(await setup($, ctx)).replace(/\/session-restore$/, '')
+  // shortcut: reads the whole transcript once per turn, and fs.read refuses one past 4 MiB, whose name then stays.
+  const text = await $.fs.read(transcriptPath(config, cwd, id)).catch(() => undefined)
+
+  return typeof text === 'string' ? nameFromTranscript(text) : undefined
+}
+
 /** Writes this session's record; a session with no prompt yet has no transcript to resume. */
 async function sync($: Engine, ctx: Ctx): Promise<void> {
   if (!ctx.isTracking) return
@@ -151,14 +170,16 @@ async function sync($: Engine, ctx: Ctx): Promise<void> {
     ctx.tracked = { id, cwd: await $.session.root(), status: 'open', startedAt: now, lastSeen: now }
     ctx.titleTurns = -1
   }
-  let title = ctx.tracked.title
-  // The messages are read for a title only after a new turn: a session opened with a slash command has none to find.
-  if (title === undefined && turns !== ctx.titleTurns) {
+  let { title, name } = ctx.tracked
+  // The messages and the transcript are read only after a new turn: a session opened with a slash command has no
+  // title to find, and a name changes between turns at most.
+  if (turns !== ctx.titleTurns) {
     ctx.titleTurns = turns
-    title = await firstPrompt($)
+    if (title === undefined) title = await firstPrompt($)
+    name = (await transcriptName($, ctx, ctx.tracked.cwd, id)) ?? name
   }
   if (ctx.ends !== ends || ctx.tracked?.id !== id || ctx.tracked.status !== 'open') return
-  ctx.tracked = { ...ctx.tracked, ...ctx.facts, title, status: 'open', lastSeen: now }
+  ctx.tracked = { ...ctx.tracked, ...ctx.facts, title, name, status: 'open', lastSeen: now }
   await save($, ctx, ctx.tracked)
 }
 
@@ -249,8 +270,8 @@ async function liveness($: Engine, ctx: Ctx): Promise<Liveness | null> {
   }
 }
 
-/** Reads every record and publishes the sessions that were cut off. */
-async function scan($: Engine, ctx: Ctx): Promise<SessionRecord[]> {
+/** Every record but this session's, the latest first, with the running processes when an open one needs them. */
+async function others($: Engine, ctx: Ctx): Promise<[SessionRecord[], Liveness | null, number]> {
   const folder = await setup($, ctx)
   const entries = await $.fs.list(folder).catch(() => [])
   const records: SessionRecord[] = []
@@ -264,13 +285,26 @@ async function scan($: Engine, ctx: Ctx): Promise<SessionRecord[]> {
   }
 
   const ownId = await $.session.id()
-  const others = records.filter(rec => rec.id !== ownId && rec.id !== ctx.tracked?.id)
-  const alive = others.some(rec => rec.status === 'open') ? await liveness($, ctx) : null
-  const now = await $.clock.now()
-  const list = others.filter(rec => isInterrupted(rec, now, alive)).sort((a, b) => b.lastSeen - a.lastSeen)
-  await update($, interrupted, () => list)
+  const list = records.filter(rec => rec.id !== ownId && rec.id !== ctx.tracked?.id)
+  const alive = list.some(rec => rec.status === 'open') ? await liveness($, ctx) : null
 
-  return list
+  return [list.sort((a, b) => b.lastSeen - a.lastSeen), alive, await $.clock.now()]
+}
+
+/** Reads every record and publishes the sessions that were cut off. */
+async function scan($: Engine, ctx: Ctx): Promise<SessionRecord[]> {
+  const [list, alive, now] = await others($, ctx)
+  const cut = list.filter(rec => isInterrupted(rec, now, alive))
+  await update($, interrupted, () => cut)
+
+  return cut
+}
+
+/** Every other session `/sessions` lists, the latest first, and which of them still run: those it never reopens. */
+async function sessions($: Engine, ctx: Ctx): Promise<[SessionRecord[], Set<string>]> {
+  const [list, alive, now] = await others($, ctx)
+
+  return [list, new Set(list.filter(rec => isRunning(rec, now, alive)).map(rec => rec.id))]
 }
 
 /**
@@ -289,17 +323,32 @@ async function launch($: Engine, ctx: Ctx, recs: readonly SessionRecord[]): Prom
  * list as last scanned: since then another session may have restored one, or the person resumed it by hand, and
  * reopening it would put two claude processes on one transcript.
  */
-async function stillCutOff($: Engine, ctx: Ctx, ids: readonly string[]): Promise<[SessionRecord[], string[]]> {
+async function stillCutOff(
+  $: Engine,
+  ctx: Ctx,
+  ids: readonly string[],
+  pick: Reopens = 'cut-off',
+): Promise<[SessionRecord[], string[]]> {
   // A set: `/restore 1,1`, or a number and its id's prefix, names one session twice.
   const wanted = new Set(ids)
-  const chosen = (await scan($, ctx)).filter(rec => wanted.has(rec.id))
+  const now = pick === 'cut-off' ? await scan($, ctx) : await notRunning($, ctx)
+  const chosen = now.filter(rec => wanted.has(rec.id))
   const left = wanted.size - chosen.length
+  const no = pick === 'cut-off' ? 'no longer cut off' : 'still running'
   const note =
-    left === 1
-      ? '1 session was no longer cut off, so it was left alone.'
-      : `${left} sessions were no longer cut off, so they were left alone.`
+    left === 1 ? `1 session was ${no}, so it was left alone.` : `${left} sessions were ${no}, so they were left alone.`
 
   return [chosen, left > 0 ? [note] : []]
+}
+
+/** What a restore may open: the sessions cut off (`/restore`, the band), or any whose claude no longer runs. */
+type Reopens = 'cut-off' | 'not-running'
+
+/** `/sessions` reopens any session but one whose claude still runs: two processes on one transcript would clash. */
+async function notRunning($: Engine, ctx: Ctx): Promise<SessionRecord[]> {
+  const [list, running] = await sessions($, ctx)
+
+  return list.filter(rec => !running.has(rec.id))
 }
 
 /**
@@ -448,9 +497,9 @@ async function restoreUnix($: Engine, ctx: Ctx, chosen: SessionRecord[], lines: 
   return { text: [...lines, ...failed].join('\n'), commands: failed.length > 0 }
 }
 
-function restore($: Engine, ctx: Ctx, ids: readonly string[]): Promise<Restored> {
+function restore($: Engine, ctx: Ctx, ids: readonly string[], pick: Reopens = 'cut-off'): Promise<Restored> {
   return oneAtATime(ctx, async () => {
-    const [chosen, lines] = await stillCutOff($, ctx, ids)
+    const [chosen, lines] = await stillCutOff($, ctx, ids, pick)
     if (chosen.length === 0) {
       return { text: lines.length > 0 ? lines.join('\n') : 'No interrupted sessions to restore.', commands: false }
     }
@@ -543,8 +592,32 @@ async function track($: Engine, ctx: Ctx): Promise<void> {
   await setup($, ctx)
   await sync($, ctx)
   await beat($, ctx)
-  await scan($, ctx)
+  const cut = await scan($, ctx)
   $.clock.every(HEARTBEAT_MS, () => void beat($, ctx).catch(() => undefined))
+  if (ctx.isWindows) await placeAutostart($, ctx).catch(err => $.ui.log(`session-restore: ${err}`, { to: 'debug' }))
+  // Only the session Windows started at logon restores without a click, and only when the option says all.
+  if (ctx.autostart === 'all' && cut.length > 0 && (await $.env.get('SESSION_RESTORE_AUTOSTART')) === '1') {
+    restoreFromClick(
+      $,
+      ctx,
+      cut.map(rec => rec.id),
+    )
+  }
+}
+
+/** The Startup folder's file, written while the `autostart` option asks for it and removed once it is off. */
+async function placeAutostart($: Engine, ctx: Ctx): Promise<void> {
+  const appData = await $.env.get('APPDATA')
+  if (appData === undefined) return
+  const file = `${appData}/Microsoft/Windows/Start Menu/Programs/Startup/${AUTOSTART_FILE}`.replace(/\\/g, '/')
+  const exists = await $.fs.exists(file)
+  if (ctx.autostart === 'off') {
+    // fs has no delete; the path reaches PowerShell as base64.
+    if (exists) await runPowerShell($, `Remove-Item -LiteralPath ${psString(file)} -ErrorAction SilentlyContinue`)
+    return
+  }
+  const text = autostartFile()
+  if (!exists || (await $.fs.read(file).catch(() => '')) !== text) await $.fs.write(file, text)
 }
 
 function openPane($: Engine): void {
@@ -562,10 +635,39 @@ function listing(list: readonly SessionRecord[], now: number): string {
   ].join('\n')
 }
 
+/**
+ * `/sessions`: every session the records hold, the latest first, numbered by that order whatever the filter, so a
+ * number read from a filtered list reopens the same session.
+ */
+function sessionsListing(list: readonly SessionRecord[], running: Set<string>, now: number, filter: string): string {
+  const needle = filter.toLowerCase()
+  const rows = list
+    .map((rec, i) => ({ rec, n: i + 1 }))
+    .filter(({ rec }) =>
+      [rec.name, rec.title, rec.cwd, rec.id].some(field => field?.toLowerCase().includes(needle) === true),
+    )
+  if (rows.length === 0) return `No session matches "${filter}".`
+  const shown = rows.slice(0, SESSIONS_SHOWN).map(({ rec, n }) => {
+    const state = running.has(rec.id) ? 'running' : rec.status === 'open' ? 'cut off' : rec.status
+    return `  ${n}. ${labelOf(rec)} - ${rec.cwd}, ${state}, last active ${ago(now - rec.lastSeen)}`
+  })
+  const more =
+    rows.length > SESSIONS_SHOWN ? [`  ... and ${rows.length - SESSIONS_SHOWN} more: add words to narrow`] : []
+
+  return [
+    `${plural(rows.length, 'session')}:`,
+    ...shown,
+    ...more,
+    '',
+    '/sessions 2 (or 1,3) reopens some, /sessions <words> finds by name, prompt or folder.',
+  ].join('\n')
+}
+
 export const register: Register = (on, options) => {
   const ctx: Ctx = {
     shell: SHELLS.find(one => one === options.shell) ?? 'powershell',
     terminal: TERMINALS.find(one => one === options.terminal) ?? 'auto',
+    autostart: AUTOSTARTS.find(one => one === options.autostart) ?? 'off',
     dir: null,
     platform: 'other',
     isWindows: false,
@@ -586,6 +688,11 @@ export const register: Register = (on, options) => {
       name: 'restore',
       description: 'Reopen Claude sessions cut off by a crash, restart or closed terminal',
       argumentHint: '[all | 1,2 | forget]',
+    })
+    await $.command.register({
+      name: 'sessions',
+      description: 'List the Claude sessions of every folder, find one by name, and reopen it',
+      argumentHint: '[words | 1,2]',
     })
     // A session started from another's tool (a nested claude) keeps no transcript to resume.
     const isChild = Boolean(await $.env.get('CLAUDE_CODE_CHILD_SESSION'))
@@ -624,6 +731,21 @@ export const register: Register = (on, options) => {
     if (e.source === 'resume') void sync($, ctx).catch(() => undefined)
 
     return done
+  })
+
+  on('command.run', { command: 'sessions' }, async ($, e) => {
+    const [list, running] = await sessions($, ctx)
+    const now = await $.clock.now()
+    const arg = e.args.trim()
+    if (list.length === 0) return { text: 'No sessions recorded yet.' }
+    if (!/^\d+([\s,]+\d+)*$/.test(arg)) return { text: sessionsListing(list, running, now, arg) }
+
+    const ids = arg.split(/[\s,]+/).map(n => list[Number(n) - 1]?.id)
+    if (ids.some(id => id === undefined)) {
+      return { text: `No session is numbered "${arg}".\n\n${sessionsListing(list, running, now, '')}` }
+    }
+
+    return { text: (await restore($, ctx, ids as string[], 'not-running')).text }
   })
 
   on('command.run', { command: 'restore' }, async ($, e) => {

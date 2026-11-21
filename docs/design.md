@@ -26,6 +26,7 @@ keep no transcript to resume, so they write none.
 |---|---|
 | `id`, `cwd` | the session and its folder, what `claude --resume` needs |
 | `title` | the first line of the first prompt, at most 80 characters, for the list |
+| `name` | the session's latest name in its transcript: a `custom-title` entry (`/rename`), else an `ai-title`; lists show it before the title |
 | `status` | below |
 | `startedAt`, `lastSeen`, `endedAt` | milliseconds; `lastSeen` moves on every turn and every heartbeat |
 | `endReason` | the reason `session.end` gave |
@@ -97,7 +98,35 @@ The machine keeps apart the records of several machines sharing one folder (an N
 `~/.claude`): a record whose machine this listing doesn't hold is judged by its heartbeat, since its pid means nothing
 here. An empty listing counts as none. The lookup's folders reach it as arguments, never written into the script.
 
-## Offering and restoring
+## The name
+
+After each new turn, `sync` reads the session's transcript, `<config>/projects/<folder>/<id>.jsonl`, where the folder
+is the project root with every character but a letter or a digit written `-` (`transcriptPath`), and keeps the last
+`custom-title` entry's name, else the last `ai-title` one's (`nameFromTranscript`). A transcript `fs.read` refuses (past
+4 MiB), or one Claude Code filed under a shortened folder name (past 200 characters), keeps the name the record had.
+
+## /sessions
+
+`/sessions` reads every record but its own session's, the latest first, numbered in that order; words only hide rows,
+so a number read from a filtered list reopens the same session. A number reopens any session whose claude no longer
+runs (`isRunning`: open, and its process found by the same pid and start time `isInterrupted` uses), through the same
+restore as `/restore`, which scans again first: a session that started running since the list is left alone and
+counted. It knows only the sessions the plugin recorded, for the 14 days records are kept.
+
+## Opening Claude at logon (Windows)
+
+The `autostart` option, read at each tracked session's start on Windows (`placeAutostart`):
+
+- **`ask` and `all`** write `%APPDATA%/Microsoft/Windows/Start Menu/Programs/Startup/claude-session-restore.cmd`
+  (`autostartFile`): one `powershell -WindowStyle Hidden -EncodedCommand <base64>` line, fixed words and base64 only.
+  Its script (`AUTOSTART_SCRIPT`) holds no record text: it sets `SESSION_RESTORE_AUTOSTART=1`, finds the claude on
+  PATH at logon, and opens it in the home folder as a tab of the `claude-restore` Windows Terminal window, where
+  restores open too; without Windows Terminal, in a console window.
+- **`all`:** a session that starts with that variable set restores every session cut off, as Restore all would. A
+  session someone opened has no such variable, and restores nothing without a click. The launcher clears the variable
+  with the other session variables (`SESSION_ENV`), so the sessions it reopens don't restore again.
+- **`off`** removes the file when it is there, through PowerShell with its path as base64: `$.fs` has no delete.
+
 
 - **The scan** reads every record, skips this session's own, and publishes the cut-off ones to `$.state`, which the
   band and the pane read. It runs at start, on `/restore`, and before and after every restore or dismiss.

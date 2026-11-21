@@ -8,6 +8,11 @@ in the same PR; `docs/releasing.md` says how a release dates it.
 
 ### Added
 
+- `/sessions` lists the sessions of every folder, cut off or not, finds them by words, and reopens one by its number
+  unless its claude still runs.
+- Lists show a session by its name: the one `/rename` gave it, else the one Claude Code chose, else its first prompt.
+- The `autostart` option (Windows): `ask` opens a claude at logon that shows the band, `all` one that reopens every
+  session cut off by itself; `off`, the default, removes the Startup file.
 - Restore opens the sessions in a terminal on macOS and Linux too (#11): Terminal, or iTerm2 when you restore from it,
   on macOS; on Linux the first installed of `x-terminal-emulator`, `gnome-terminal`, `ptyxis`, `konsole`, `kitty`,
   `wezterm`, `alacritty` and `xterm`; a new tmux window inside tmux. Over SSH, or with no display, the commands are

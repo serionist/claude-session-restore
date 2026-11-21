@@ -12,6 +12,13 @@
   "keywords": ["sessions", "restore", "resume", "windows-terminal", "crash"],
   "types": "./types/index.d.ts",
   "userConfig": {
+    "autostart": {
+      "type": "string",
+      "title": "Open Claude when Windows starts (Windows)",
+      "description": "ask: at logon, a claude opens in your home folder and shows the band. all: it reopens every session cut off by itself. off: nothing; a Claude session removes the Startup file. Takes effect at the next session's start.",
+      "default": "off",
+      "options": ["off", "ask", "all"]
+    },
     "shell": {
       "type": "string",
       "title": "Shell for restored tabs",

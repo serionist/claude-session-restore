@@ -41,7 +41,17 @@ export function statusForEnd(reason: string): SessionStatus {
 export function isInterrupted(rec: SessionRecord, now: number, alive: Liveness | null): boolean {
   if (now - rec.lastSeen > MAX_AGE_MS) return false
   if (rec.status === 'interrupted') return true
-  if (rec.status !== 'open') return false
+
+  return rec.status === 'open' && isGone(rec, now, alive)
+}
+
+/** Whether a session's claude still runs: open, and its process not gone. `/sessions` never reopens one. */
+export function isRunning(rec: SessionRecord, now: number, alive: Liveness | null): boolean {
+  return rec.status === 'open' && !isGone(rec, now, alive)
+}
+
+/** Whether an open record's process is gone: its pid and start no longer match, or, unknown, its heartbeat stopped. */
+function isGone(rec: SessionRecord, now: number, alive: Liveness | null): boolean {
   if (alive !== null && rec.pid !== undefined && rec.pidStarted !== undefined) {
     // A record from another machine sharing the folder (an NFS home, a container mounting ~/.claude): its pid means
     // nothing in this listing, so its heartbeat decides.
@@ -306,6 +316,8 @@ export const SESSION_ENV = [
   'CLAUDE_CODE_MESSAGING_TOKEN',
   'CLAUDE_CODE_SESSION_ATTENDED',
   'CLAUDE_CODE_ENTRYPOINT',
+  // The session Windows starts at logon restores all; the sessions it reopens must not do it again.
+  'SESSION_RESTORE_AUTOSTART',
 ]
 
 /** What the launcher reads: the variables to clear, Windows Terminal's lines, and the console windows otherwise. */
@@ -345,7 +357,68 @@ export function launchScript(planPath: string): string {
 }
 
 export function labelOf(rec: SessionRecord): string {
-  return rec.title ?? folderName(rec.cwd)
+  return rec.name ?? rec.title ?? folderName(rec.cwd)
+}
+
+/**
+ * Where Claude Code keeps a session's transcript: its folder with every character but a letter or a digit as `-`.
+ * shortcut: Claude Code shortens a folder name past 200 characters with a hash; such a session keeps its title.
+ */
+export function transcriptPath(config: string, cwd: string, id: string): string {
+  return `${config}/projects/${cwd.replace(/[^A-Za-z0-9]/g, '-')}/${id}.jsonl`
+}
+
+/** The session's latest name in its transcript: the one `/rename` gave, else the one Claude Code chose. */
+export function nameFromTranscript(text: string): string | undefined {
+  return lastEntry(text, 'custom-title', 'customTitle') ?? lastEntry(text, 'ai-title', 'aiTitle')
+}
+
+function lastEntry(text: string, type: string, field: string): string | undefined {
+  const at = text.lastIndexOf(`"type":"${type}"`)
+  if (at < 0) return undefined
+  const start = text.lastIndexOf('\n', at) + 1
+  const end = text.indexOf('\n', at)
+  try {
+    const value = JSON.parse(text.slice(start, end < 0 ? undefined : end))[field]
+    return typeof value === 'string' && value.trim() !== '' ? titleFromPrompt(value) : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** What the session Windows starts at logon does: `ask` shows the band, `all` restores every session cut off. */
+export type Autostart = 'off' | 'ask' | 'all'
+
+/** The variable the logon session carries, so it alone restores without a click. */
+export const AUTOSTART_ENV = 'SESSION_RESTORE_AUTOSTART'
+
+/** The file written into the Startup folder; nothing of a record's is in it. */
+export const AUTOSTART_FILE = 'claude-session-restore.cmd'
+
+/**
+ * Run at logon: claude in the home folder, in the Windows Terminal window restores open into, carrying AUTOSTART_ENV.
+ * The claude is the program on PATH then, so an update that moves it changes nothing here.
+ */
+export const AUTOSTART_SCRIPT = [
+  `$env:${AUTOSTART_ENV} = '1'`,
+  `$claude = Get-Command claude -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1`,
+  `if (-not $claude) { exit 1 }`,
+  `$wt = Get-Command wt.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1`,
+  `if ($wt) {`,
+  // wt splits its own arguments on `;`, which a folder name may hold.
+  `  $line = '-w ${WT_WINDOW} new-tab -d "{0}" "{1}"' -f ($env:USERPROFILE -replace ';', '\\;'), ($claude.Source -replace ';', '\\;')`,
+  `  Start-Process -FilePath $wt.Source -ArgumentList $line`,
+  `} else {`,
+  `  $dir = [Management.Automation.WildcardPattern]::Escape($env:USERPROFILE)`,
+  `  Start-Process -FilePath $claude.Source -WorkingDirectory $dir`,
+  `}`,
+].join('\n')
+
+/** The Startup folder's file: a PowerShell, hidden, running AUTOSTART_SCRIPT; fixed words and base64 only. */
+export function autostartFile(): string {
+  const argv = 'powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -EncodedCommand'
+
+  return `@echo off\r\n${argv} ${encodePowerShell(AUTOSTART_SCRIPT)}\r\n`
 }
 
 /** The first line of a prompt, cut to fit a list row. */

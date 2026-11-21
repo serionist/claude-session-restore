@@ -20,7 +20,7 @@ crash, a restart or a closed terminal cut off. The repo is its own marketplace.
 
 | Path | What |
 |---|---|
-| `plugin/` | the plugin: `.claude-plugin/plugin.json` (name, version, the `shell` and `terminal` options), `hooks/` (`hooks.json`, `register.tsx`, `lib.ts`, and their tests `register.test.tsx`, `lib.test.ts`), `types/index.d.ts`, `tsconfig.json`, `README.md` |
+| `plugin/` | the plugin: `.claude-plugin/plugin.json` (name, version, the `shell`, `terminal` and `autostart` options), `hooks/` (`hooks.json`, `register.tsx`, `lib.ts`, and their tests `register.test.tsx`, `lib.test.ts`), `types/index.d.ts`, `tsconfig.json`, `README.md` |
 | `.claude-plugin/marketplace.json` | the marketplace: one plugin, source `./plugin` |
 | `docs/` | `design.md` (how it works), `releasing.md`, `testing-by-hand.md` (a real window, on each system); `plans/`, `reviews/`: dated records, never current truth |
 | `tools/` | `gate.ts` (the gate), `hooks.ts` (behind `.githooks/`), `setup.ts` (once per clone; `link` for skills), `gate.test.ts`, `launcher.test.ts` (the restore scripts run for real: PowerShell on Windows, `sh` on macOS and Linux), `try-restore.sh` (the by-hand test's setup and check); Node's standard library only |
@@ -94,7 +94,8 @@ in `0.x` a minor may break one, under CHANGELOG's Breaking.
 
 - the plugin's and the marketplace's name, `session-restore`;
 - the `/restore` command and its arguments (`all`, numbers, an id prefix, `forget`);
-- the `shell` and `terminal` options, their names and their values;
+- the `/sessions` command and its arguments (words, numbers);
+- the `shell`, `terminal` and `autostart` options, their names and their values;
 - the record folder, `<config>/session-restore/sessions/`, and the record's fields: a new version reads the records an
   older one wrote, so a field is added, never renamed or retyped.
 

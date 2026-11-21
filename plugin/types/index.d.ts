@@ -12,6 +12,8 @@ export type SessionRecord = {
   id: string
   cwd: string
   title?: string
+  /** The session's name, from `/rename` or the one Claude Code chose; shown before the title. */
+  name?: string
   status: SessionStatus
   startedAt: number
   lastSeen: number
