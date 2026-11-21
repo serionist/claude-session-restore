@@ -115,12 +115,13 @@ What this code already paid for; `docs/design.md` has the detail.
 | Windows PowerShell writes to a pipe in the console's code page, garbling `C:\Users\Sóma` | `runPowerShell` | UTF-8 output first |
 | A shell `cd` in a tool moved `cwd()`, and the restore opened a folder `--resume` can't find the session from | `sync` | The record keeps `root()` |
 | The process lookup failed at startup, while MCP servers spawn | `beat` | Tried again at heartbeats 1, 3, 7 and 15, then no more |
-| The band acted on the list as last scanned, and reopened a session already restored or resumed | `stillCutOff` | Restore and Dismiss scan again, one at a time |
+| The band acted on the list as last scanned, and reopened a session already restored or resumed | `stillReopenable` | Restore and Dismiss scan again, one at a time |
 | tmux reads `new-window -c <folder>` as a format, where `#(...)` runs a command | `terminalArgv` | No terminal gets the folder; the script `cd`s |
 | Most Linux terminals run until their window closes, Ubuntu's `x-terminal-emulator` on purpose, and a call past 30 s is killed with the window | `detached` | Started apart with `setsid -f` |
 | Linux derives `ps`'s start time from the wall clock, which a laptop's wake can step | `PROCESSES`, `LOOKUP` | The boot id and the start tick, from /proc |
 | A heartbeat's save landed after `/exit` closed the record, and the dead session was offered | `sync`, `save` | A count of ends; one write queue |
 | A session with no prompt has no transcript, and `--resume` finds nothing | `sync` | Tracked from its first turn |
+| A reload starts the logon session again, which restored, without a click, sessions closed since | `track` | `SESSION_RESTORE_AUTOSTART` unset once read |
 
 ## Look up APIs before coding against them
 

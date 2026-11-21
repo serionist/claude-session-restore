@@ -45,8 +45,13 @@ export function isInterrupted(rec: SessionRecord, now: number, alive: Liveness |
   return rec.status === 'open' && isGone(rec, now, alive)
 }
 
-/** Whether a session's claude still runs: open, and its process not gone. `/sessions` never reopens one. */
+/**
+ * Whether a session's claude still runs, or is still starting: open with its process not gone, or restored within
+ * STALE_MS, before the resumed claude's first save marks it open. `/sessions` never reopens one.
+ */
 export function isRunning(rec: SessionRecord, now: number, alive: Liveness | null): boolean {
+  if (rec.status === 'restored') return now - rec.lastSeen <= STALE_MS
+
   return rec.status === 'open' && !isGone(rec, now, alive)
 }
 
@@ -301,6 +306,9 @@ export function consoleStarts(recs: readonly SessionRecord[], shell: Shell): Con
   })
 }
 
+/** The variable the logon session carries, so it alone restores without a click. */
+export const AUTOSTART_ENV = 'SESSION_RESTORE_AUTOSTART'
+
 /**
  * Variables a session sets for the processes it starts. Windows Terminal
  * hands the caller's environment to new tabs, and a claude that sees them
@@ -317,7 +325,7 @@ export const SESSION_ENV = [
   'CLAUDE_CODE_SESSION_ATTENDED',
   'CLAUDE_CODE_ENTRYPOINT',
   // The session Windows starts at logon restores all; the sessions it reopens must not do it again.
-  'SESSION_RESTORE_AUTOSTART',
+  AUTOSTART_ENV,
 ]
 
 /** What the launcher reads: the variables to clear, Windows Terminal's lines, and the console windows otherwise. */
@@ -389,28 +397,30 @@ function lastEntry(text: string, type: string, field: string): string | undefine
 /** What the session Windows starts at logon does: `ask` shows the band, `all` restores every session cut off. */
 export type Autostart = 'off' | 'ask' | 'all'
 
-/** The variable the logon session carries, so it alone restores without a click. */
-export const AUTOSTART_ENV = 'SESSION_RESTORE_AUTOSTART'
-
 /** The file written into the Startup folder; nothing of a record's is in it. */
 export const AUTOSTART_FILE = 'claude-session-restore.cmd'
 
 /**
- * Run at logon: claude in the home folder, in the Windows Terminal window restores open into, carrying AUTOSTART_ENV.
- * The claude is the program on PATH then, so an update that moves it changes nothing here.
+ * Run at logon: claude in the home folder, in the Windows Terminal window restores open into. The claude is the program
+ * on PATH then, so an update that moves it changes nothing here. AUTOSTART_ENV is set only inside the tab's own
+ * PowerShell, never here: a Windows Terminal this starts would hand it to every tab opened later, and each claude in
+ * them would restore without a click. The tab's script carries the claude's path as base64, so it is never code.
  */
 export const AUTOSTART_SCRIPT = [
-  `$env:${AUTOSTART_ENV} = '1'`,
   `$claude = Get-Command claude -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1`,
   `if (-not $claude) { exit 1 }`,
+  `$path = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($claude.Source))`,
+  `$tab = "\`$env:${AUTOSTART_ENV} = '1'; & ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$path')))"`,
+  `$run = '-NoProfile -EncodedCommand ' + [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($tab))`,
+  `$dir = $env:USERPROFILE`,
   `$wt = Get-Command wt.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1`,
   `if ($wt) {`,
   // wt splits its own arguments on `;`, which a folder name may hold.
-  `  $line = '-w ${WT_WINDOW} new-tab -d "{0}" "{1}"' -f ($env:USERPROFILE -replace ';', '\\;'), ($claude.Source -replace ';', '\\;')`,
+  `  $line = '-w ${WT_WINDOW} new-tab -d "{0}" powershell.exe {1}' -f ($dir -replace ';', '\\;'), $run`,
   `  Start-Process -FilePath $wt.Source -ArgumentList $line`,
   `} else {`,
-  `  $dir = [Management.Automation.WildcardPattern]::Escape($env:USERPROFILE)`,
-  `  Start-Process -FilePath $claude.Source -WorkingDirectory $dir`,
+  `  $escaped = [Management.Automation.WildcardPattern]::Escape($dir)`,
+  `  Start-Process -FilePath powershell.exe -ArgumentList $run -WorkingDirectory $escaped`,
   `}`,
 ].join('\n')
 

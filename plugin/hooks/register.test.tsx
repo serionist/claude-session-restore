@@ -58,10 +58,15 @@ function world(on: On, options: WorldOptions = {}) {
     alive: '',
   }
   const unixEnv = { HOME: '/home/test', ...options.unix?.env }
-  mock.env(
-    on,
-    options.windows === false || options.unix ? unixEnv : { OS: 'Windows_NT', USERPROFILE: HOME, ...options.env },
-  )
+  // mock.env answers only get; the plugin unsets a variable too, which a later get must see.
+  const env: Record<string, string> =
+    options.windows === false || options.unix ? unixEnv : { OS: 'Windows_NT', USERPROFILE: HOME, ...options.env }
+  on('env.get', (_, e) => ({ value: env[e.name] }))
+  on('env.set', (_, e) => {
+    if (e.value === undefined) delete env[e.name]
+    else env[e.name] = e.value
+    return { value: {} }
+  })
   const clock = mock.clock(on, { now: NOW })
   on('command.register', (_, e) => ({ value: { command: e.name } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
@@ -893,4 +898,50 @@ describe('opening Claude when Windows starts', () => {
       expect(written.some(one => one.path.endsWith('/launch.json'))).toBe(false)
     },
   )
+})
+
+describe('review round 1 regressions', () => {
+  test(
+    'all: a reload of the logon session restores nothing closed since (F1)',
+    { options: { autostart: 'all' } },
+    async ($, on) => {
+      const { files, written, clock } = world(on, {
+        env: { APPDATA: 'C:\\Users\\test\\AppData\\Roaming', SESSION_RESTORE_AUTOSTART: '1' },
+        files: { 'cut-1.json': record('cut-1') },
+      })
+      await $.session.start(START)
+      await clock.settle()
+      expect(lastWrite(written, 'cut-1').status).toBe('restored')
+
+      // The person closes a restored tab, a signal: interrupted. Then an option changes, and the plugin reloads.
+      files['cut-2.json'] = record('cut-2')
+      await $.session.start(START)
+      await clock.settle()
+
+      expect(written.some(one => one.path.endsWith(`${SESSIONS}/cut-2.json`))).toBe(false)
+    },
+  )
+
+  test('off Windows, nothing is written to a Startup folder (F7)', { options: { autostart: 'all' } }, async ($, on) => {
+    const { written, clock } = world(on, { unix: { name: 'Linux' } })
+    await $.session.start(START)
+    await clock.settle()
+
+    expect(written.some(one => one.path.includes('Startup'))).toBe(false)
+  })
+
+  test('/sessions does not reopen a session it restored seconds ago, before its claude saved (F4)', async ($, on) => {
+    const closed = record('old', { status: 'closed', lastSeen: NOW - 60 * MINUTE })
+    const { written, clock } = world(on, { files: { 'old.json': closed } })
+    await $.session.start(START)
+    await clock.settle()
+
+    const run = { command: 'sessions', args: '1' } as Parameters<typeof $.command.run>[0]
+    expect((await $.command.run(run)).text).toBe('Reopened 1 session.')
+    await clock.advance(MINUTE)
+    const again = await $.command.run(run)
+
+    expect(again.text).toBe('1 session was still running, so it was left alone.')
+    expect(written.filter(one => one.path.endsWith('/launch.json')).length).toBe(1)
+  })
 })

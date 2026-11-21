@@ -109,7 +109,8 @@ is the project root with every character but a letter or a digit written `-` (`t
 
 `/sessions` reads every record but its own session's, the latest first, numbered in that order; words only hide rows,
 so a number read from a filtered list reopens the same session. A number reopens any session whose claude no longer
-runs (`isRunning`: open, and its process found by the same pid and start time `isInterrupted` uses), through the same
+runs (`isRunning`: open, and its process found by the same pid and start time `isInterrupted` uses; or restored in
+the last 5 minutes, before the resumed claude's first save marks it open), through the same
 restore as `/restore`, which scans again first: a session that started running since the list is left alone and
 counted. It knows only the sessions the plugin recorded, for the 14 days records are kept.
 
@@ -119,20 +120,26 @@ The `autostart` option, read at each tracked session's start on Windows (`placeA
 
 - **`ask` and `all`** write `%APPDATA%/Microsoft/Windows/Start Menu/Programs/Startup/claude-session-restore.cmd`
   (`autostartFile`): one `powershell -WindowStyle Hidden -EncodedCommand <base64>` line, fixed words and base64 only.
-  Its script (`AUTOSTART_SCRIPT`) holds no record text: it sets `SESSION_RESTORE_AUTOSTART=1`, finds the claude on
-  PATH at logon, and opens it in the home folder as a tab of the `claude-restore` Windows Terminal window, where
-  restores open too; without Windows Terminal, in a console window.
-- **`all`:** a session that starts with that variable set restores every session cut off, as Restore all would. A
-  session someone opened has no such variable, and restores nothing without a click. The launcher clears the variable
-  with the other session variables (`SESSION_ENV`), so the sessions it reopens don't restore again.
+  Its script (`AUTOSTART_SCRIPT`) holds no record text: it finds the claude on PATH at logon, and opens it in the
+  home folder as a tab of the `claude-restore` Windows Terminal window, where restores open too; without Windows
+  Terminal, in a console window. The tab runs a PowerShell of its own that sets `SESSION_RESTORE_AUTOSTART=1` and
+  starts that claude, its path as base64: set before `wt`, the variable would live in the Windows Terminal it starts,
+  and reach every tab opened in it later.
+- **`all`:** a session that starts with that variable set restores every session cut off, as Restore all would, then
+  unsets it in its process: a reload (an option changed, an update) starts the session again, and must not reopen
+  sessions closed since. A session someone opened has no such variable, and restores nothing without a click. The
+  launcher clears the variable with the other session variables (`SESSION_ENV`), so the sessions it reopens don't
+  restore again.
 - **`off`** removes the file when it is there, through PowerShell with its path as base64: `$.fs` has no delete.
+  Changing the option reloads the plugin, so it takes effect at once. Uninstalling runs nothing, and leaves the file.
 
+## Offering and restoring
 
 - **The scan** reads every record, skips this session's own, and publishes the cut-off ones to `$.state`, which the
   band and the pane read. It runs at start, on `/restore`, and before and after every restore or dismiss.
 - **The band** (`AbovePrompt`) shows when there are any: Restore all, Choose (the pane), Dismiss. It stays out of the
   way while Claude Code shows a survey.
-- **A click acts on the list as it is now** (`stillCutOff`): the band shows the list as last scanned, and since then
+- **A click acts on the list as it is now** (`stillReopenable`): the band shows the list as last scanned, and since then
   another session may have restored a session, or the person resumed it by hand. Restore and Dismiss scan again and
   leave alone each session no longer cut off, saying how many. They run one at a time (`oneAtATime`): the band stays
   clickable while a launch runs, and a second click scans after the first marked its sessions `restored`.

@@ -15,7 +15,7 @@
     "autostart": {
       "type": "string",
       "title": "Open Claude when Windows starts (Windows)",
-      "description": "ask: at logon, a claude opens in your home folder and shows the band. all: it reopens every session cut off by itself. off: nothing; a Claude session removes the Startup file. Takes effect at the next session's start.",
+      "description": "ask: at logon, a claude opens in your home folder and shows the band. all: it reopens every session cut off by itself. off: nothing; a Claude session removes the Startup file. Takes effect at once.",
       "default": "off",
       "options": ["off", "ask", "all"]
     },

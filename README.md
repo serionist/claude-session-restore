@@ -71,7 +71,7 @@ Lists show each session by its name: the one `/rename` gave it, else the one Cla
 - `autostart` (Windows): `off` (the default), `ask` or `all`. With `ask` or `all`, the plugin puts
   `claude-session-restore.cmd` in your Startup folder, and at logon a claude opens in your home folder, in the window
   restores open into: with `ask` it shows the band, with `all` it reopens every session cut off by itself. `off`
-  removes the file. A change takes effect at the next session's start.
+  removes the file. A change takes effect at once, in the session where you make it.
 
 ## How it knows
 
@@ -115,7 +115,9 @@ the next restore.
 ## Uninstall
 
 `/plugin uninstall session-restore@session-restore`. The records stay in `~/.claude/session-restore/` until you delete
-the folder.
+the folder. With `autostart` on, set it to `off` first (the plugin removes its Startup file at once), or delete
+`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\claude-session-restore.cmd` afterwards: no plugin runs at
+uninstall to remove it, and a claude would still open at each logon.
 
 ## Developing
 

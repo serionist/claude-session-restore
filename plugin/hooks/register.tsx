@@ -323,7 +323,7 @@ async function launch($: Engine, ctx: Ctx, recs: readonly SessionRecord[]): Prom
  * list as last scanned: since then another session may have restored one, or the person resumed it by hand, and
  * reopening it would put two claude processes on one transcript.
  */
-async function stillCutOff(
+async function stillReopenable(
   $: Engine,
   ctx: Ctx,
   ids: readonly string[],
@@ -485,7 +485,7 @@ async function restoreUnix($: Engine, ctx: Ctx, chosen: SessionRecord[], lines: 
 
   const reopened = `Reopened ${plural(opened.length, 'session')} in ${terminalName(where)}`
   try {
-    for (const rec of opened) await save($, ctx, { ...rec, status: 'restored' })
+    for (const rec of opened) await save($, ctx, { ...rec, status: 'restored', lastSeen: await $.clock.now() })
     if (opened.length > 0) lines.unshift(`${reopened}.`)
   } catch (err) {
     lines.unshift(`${reopened}, but could not mark them restored (${errorText(err)}): they may be offered again.`)
@@ -499,7 +499,7 @@ async function restoreUnix($: Engine, ctx: Ctx, chosen: SessionRecord[], lines: 
 
 function restore($: Engine, ctx: Ctx, ids: readonly string[], pick: Reopens = 'cut-off'): Promise<Restored> {
   return oneAtATime(ctx, async () => {
-    const [chosen, lines] = await stillCutOff($, ctx, ids, pick)
+    const [chosen, lines] = await stillReopenable($, ctx, ids, pick)
     if (chosen.length === 0) {
       return { text: lines.length > 0 ? lines.join('\n') : 'No interrupted sessions to restore.', commands: false }
     }
@@ -522,7 +522,7 @@ function restore($: Engine, ctx: Ctx, ids: readonly string[], pick: Reopens = 'c
       if (launched) {
         const reopened = `Reopened ${plural(ready.length, 'session')}`
         try {
-          for (const rec of ready) await save($, ctx, { ...rec, status: 'restored' })
+          for (const rec of ready) await save($, ctx, { ...rec, status: 'restored', lastSeen: await $.clock.now() })
           lines.unshift(`${reopened}.`)
         } catch (err) {
           lines.unshift(`${reopened}, but could not mark them restored (${errorText(err)}): they may be offered again.`)
@@ -557,7 +557,7 @@ function restoreFromClick($: Engine, ctx: Ctx, ids: readonly string[]): void {
 
 function dismiss($: Engine, ctx: Ctx, ids: readonly string[]): Promise<number> {
   return oneAtATime(ctx, async () => {
-    const [chosen] = await stillCutOff($, ctx, ids)
+    const [chosen] = await stillReopenable($, ctx, ids)
     for (const rec of chosen) await save($, ctx, { ...rec, status: 'dismissed' })
     await scan($, ctx)
 
@@ -595,8 +595,11 @@ async function track($: Engine, ctx: Ctx): Promise<void> {
   const cut = await scan($, ctx)
   $.clock.every(HEARTBEAT_MS, () => void beat($, ctx).catch(() => undefined))
   if (ctx.isWindows) await placeAutostart($, ctx).catch(err => $.ui.log(`session-restore: ${err}`, { to: 'debug' }))
-  // Only the session Windows started at logon restores without a click, and only when the option says all.
-  if (ctx.autostart === 'all' && cut.length > 0 && (await $.env.get('SESSION_RESTORE_AUTOSTART')) === '1') {
+  // Only the session Windows started at logon restores without a click, and only when the option says all. Once: a
+  // reload (an option changed, an update) starts this process's session again, and must not reopen what was closed.
+  const atLogon = (await $.env.get('SESSION_RESTORE_AUTOSTART')) === '1'
+  if (atLogon) await $.env.set('SESSION_RESTORE_AUTOSTART', undefined)
+  if (atLogon && ctx.autostart === 'all' && cut.length > 0) {
     restoreFromClick(
       $,
       ctx,
@@ -684,16 +687,22 @@ export const register: Register = (on, options) => {
 
   on('session.start', async ($, e, next) => {
     const started = await next(e)
-    await $.command.register({
-      name: 'restore',
-      description: 'Reopen Claude sessions cut off by a crash, restart or closed terminal',
-      argumentHint: '[all | 1,2 | forget]',
-    })
-    await $.command.register({
-      name: 'sessions',
-      description: 'List the Claude sessions of every folder, find one by name, and reopen it',
-      argumentHint: '[words | 1,2]',
-    })
+    // Each apart: a command refused (a built-in of that name, one day) must not stop the session being tracked.
+    const refused = (err: unknown) => $.ui.log(`session-restore: ${err}`, { to: 'debug' })
+    await $.command
+      .register({
+        name: 'restore',
+        description: 'Reopen Claude sessions cut off by a crash, restart or closed terminal',
+        argumentHint: '[all | 1,2 | forget]',
+      })
+      .catch(refused)
+    await $.command
+      .register({
+        name: 'sessions',
+        description: 'List the Claude sessions of every folder, find one by name, and reopen it',
+        argumentHint: '[words | 1,2]',
+      })
+      .catch(refused)
     // A session started from another's tool (a nested claude) keeps no transcript to resume.
     const isChild = Boolean(await $.env.get('CLAUDE_CODE_CHILD_SESSION'))
     ctx.isTracking = e.isInteractive && e.surface === 'terminal' && !isChild

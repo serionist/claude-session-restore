@@ -396,6 +396,12 @@ describe('names and /sessions', () => {
     expect(isRunning(rec({ pid: 7, pidStarted: 'start', status: 'closed' }), NOW, alive)).toBe(false)
     // Older than a week: /restore no longer offers it, and it is still known not to run.
     expect(isRunning(rec({ pid: 8, pidStarted: 'start' }), NOW + MAX_AGE_MS, alive)).toBe(false)
+    // No process listing: the heartbeat decides.
+    expect(isRunning(rec({ lastSeen: NOW - 30_000 }), NOW, null)).toBe(true)
+    expect(isRunning(rec({ lastSeen: NOW - STALE_MS - 1 }), NOW, null)).toBe(false)
+    // Restored a moment ago: its claude may still be starting, so it counts as running until its heartbeat would.
+    expect(isRunning(rec({ status: 'restored', lastSeen: NOW - 30_000 }), NOW, alive)).toBe(true)
+    expect(isRunning(rec({ status: 'restored', lastSeen: NOW - STALE_MS - 1 }), NOW, alive)).toBe(false)
   })
 })
 
