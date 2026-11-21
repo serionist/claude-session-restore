@@ -410,7 +410,9 @@ describe('opening Claude when Windows starts', () => {
     const file = autostartFile()
     expect(file).toMatch(/^@echo off\r\npowershell\.exe [-\w ]+ -EncodedCommand [A-Za-z0-9+/=]+\r\n$/)
     expect(file).toContain(encodePowerShell(AUTOSTART_SCRIPT))
-    expect(AUTOSTART_SCRIPT).toContain("$env:SESSION_RESTORE_AUTOSTART = '1'")
+    // Set only inside the tab's own PowerShell: set here, Windows Terminal would hand it to every later tab.
+    expect(AUTOSTART_SCRIPT).toContain("\"`$env:SESSION_RESTORE_AUTOSTART = '1'; & ")
+    expect(AUTOSTART_SCRIPT.split('\n').some(line => line.trimStart().startsWith('$env:'))).toBe(false)
     expect(AUTOSTART_SCRIPT).toContain('-w claude-restore new-tab')
   })
 

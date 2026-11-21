@@ -35,6 +35,8 @@ type WorldOptions = {
   noClaude?: boolean
   /** Variables beyond the system's own. */
   env?: Record<string, string>
+  /** `$.env.set` is refused with this reason, as managed settings may. */
+  envSetDenied?: string
 }
 
 /** Answers the session and its files beneath the plugin; what it writes, runs, logs and toasts is kept. */
@@ -63,6 +65,7 @@ function world(on: On, options: WorldOptions = {}) {
     options.windows === false || options.unix ? unixEnv : { OS: 'Windows_NT', USERPROFILE: HOME, ...options.env }
   on('env.get', (_, e) => ({ value: env[e.name] }))
   on('env.set', (_, e) => {
+    if (options.envSetDenied !== undefined) return { value: { deny: options.envSetDenied } }
     if (e.value === undefined) delete env[e.name]
     else env[e.name] = e.value
     return { value: {} }
@@ -827,7 +830,7 @@ describe('/sessions', () => {
     const run: Run = { command: 'sessions', args: '1' }
     const { text } = await $.command.run(run as Parameters<typeof $.command.run>[0])
 
-    expect(text).toBe('1 session was still running, so it was left alone.')
+    expect(text).toBe('1 session was still running, or reopened less than 5 minutes ago, so it was left alone.')
     expect(written.some(one => one.path.endsWith('/launch.json'))).toBe(false)
   })
 
@@ -941,7 +944,24 @@ describe('review round 1 regressions', () => {
     await clock.advance(MINUTE)
     const again = await $.command.run(run)
 
-    expect(again.text).toBe('1 session was still running, so it was left alone.')
+    expect(again.text).toBe('1 session was still running, or reopened less than 5 minutes ago, so it was left alone.')
     expect(written.filter(one => one.path.endsWith('/launch.json')).length).toBe(1)
   })
+
+  test(
+    'all: a logon session that cannot unset the variable restores nothing (N1)',
+    { options: { autostart: 'all' } },
+    async ($, on) => {
+      const { written, logs, clock } = world(on, {
+        env: { APPDATA: 'C:Users\testAppDataRoaming', SESSION_RESTORE_AUTOSTART: '1' },
+        envSetDenied: 'held by managed settings',
+        files: { 'cut-1.json': record('cut-1') },
+      })
+      await $.session.start(START)
+      await clock.settle()
+
+      expect(written.some(one => one.path.endsWith('/launch.json'))).toBe(false)
+      expect(logs.some(line => line.includes("can't be unset: held by managed settings"))).toBe(true)
+    },
+  )
 })

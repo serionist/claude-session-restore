@@ -334,7 +334,7 @@ async function stillReopenable(
   const now = pick === 'cut-off' ? await scan($, ctx) : await notRunning($, ctx)
   const chosen = now.filter(rec => wanted.has(rec.id))
   const left = wanted.size - chosen.length
-  const no = pick === 'cut-off' ? 'no longer cut off' : 'still running'
+  const no = pick === 'cut-off' ? 'no longer cut off' : 'still running, or reopened less than 5 minutes ago'
   const note =
     left === 1 ? `1 session was ${no}, so it was left alone.` : `${left} sessions were ${no}, so they were left alone.`
 
@@ -589,16 +589,24 @@ async function beat($: Engine, ctx: Ctx): Promise<void> {
 }
 
 async function track($: Engine, ctx: Ctx): Promise<void> {
+  // Only the session Windows started at logon restores without a click, and only when the option says all. Once: a
+  // reload (an option changed, an update) starts this process's session again, and must not reopen what was closed.
+  // Read and unset first, before the lookup's seconds, so a reload meanwhile finds it gone. An unset refused (managed
+  // settings) restores nothing: a reload would find the variable still there.
+  let atLogon = (await $.env.get('SESSION_RESTORE_AUTOSTART')) === '1'
+  if (atLogon) {
+    const unset = await $.env.set('SESSION_RESTORE_AUTOSTART', undefined)
+    if (unset.deny !== undefined) {
+      $.ui.log(`session-restore: not restoring at logon, the variable can't be unset: ${unset.deny}`)
+      atLogon = false
+    }
+  }
   await setup($, ctx)
   await sync($, ctx)
   await beat($, ctx)
   const cut = await scan($, ctx)
   $.clock.every(HEARTBEAT_MS, () => void beat($, ctx).catch(() => undefined))
   if (ctx.isWindows) await placeAutostart($, ctx).catch(err => $.ui.log(`session-restore: ${err}`, { to: 'debug' }))
-  // Only the session Windows started at logon restores without a click, and only when the option says all. Once: a
-  // reload (an option changed, an update) starts this process's session again, and must not reopen what was closed.
-  const atLogon = (await $.env.get('SESSION_RESTORE_AUTOSTART')) === '1'
-  if (atLogon) await $.env.set('SESSION_RESTORE_AUTOSTART', undefined)
   if (atLogon && ctx.autostart === 'all' && cut.length > 0) {
     restoreFromClick(
       $,
