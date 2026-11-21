@@ -55,6 +55,11 @@ Claude Code releases; an issue with your version helps.
 | `/restore 2`, `/restore 1,3` | reopens some, by their number in the list |
 | `/restore 3fa9c1` | reopens the one whose session id starts so |
 | `/restore forget` | drops them from the list |
+| `/sessions` | lists every session of every folder, the latest first, cut off or not, with its name and state |
+| `/sessions gate f` | finds sessions by words in their name, first prompt, folder or id |
+| `/sessions 3`, `/sessions 1,3` | reopens some, by their number in the whole list, unless their claude still runs |
+
+Lists show each session by its name: the one `/rename` gave it, else the one Claude Code chose, else its first prompt.
 
 **Options** (in `/config`, under the plugin):
 
@@ -63,6 +68,10 @@ Claude Code releases; an issue with your version helps.
 - `terminal` (macOS, Linux): `auto` (the default, as in the table above), one of `terminal`, `iterm`, `tmux`,
   `x-terminal-emulator`, `gnome-terminal`, `ptyxis`, `konsole`, `kitty`, `wezterm`, `alacritty`, `xterm`, or `print`
   for the commands instead. A terminal this system lacks prints the commands and says why.
+- `autostart` (Windows): `off` (the default), `ask` or `all`. With `ask` or `all`, the plugin puts
+  `claude-session-restore.cmd` in your Startup folder, and at logon a claude opens in your home folder, in the window
+  restores open into: with `ask` it shows the band, with `all` it reopens every session cut off by itself. `off`
+  removes the file. A change takes effect at once, in the session where you make it.
 
 ## How it knows
 
@@ -79,7 +88,7 @@ Sessions cut off more than 7 days ago are not offered. [docs/design.md](docs/des
 
 One JSON file per session in `~/.claude/session-restore/sessions/` (under `CLAUDE_CONFIG_DIR` when that is set): the
 session's id and folder, the first line of its first prompt (80 characters at most, to tell sessions apart in the
-list), the claude process's id, start time and path, and the launch flags worth repeating. Nothing leaves your
+list), its name (from `/rename`, or the one Claude Code chose, read from its transcript after each turn), the claude process's id, start time and path, and the launch flags worth repeating. Nothing leaves your
 machine. Records untouched for 14 days are deleted. A restore also writes, beside the folder, `launch.json` on Windows
 (the plan the launcher reads) or `launch/<id>.sh` on macOS and Linux (the script a window runs), each replaced by
 the next restore.
@@ -97,12 +106,18 @@ the next restore.
 - **Without Windows Terminal,** each session opens in a console window of its own.
 - **A session with no prompt yet** has no transcript to resume, so it is not tracked.
 - **Sessions started by another session's tool** (a nested claude) keep no transcript and are not tracked.
-- **Nothing runs until you open a Claude session** after the restart: the plugin lives inside Claude Code.
+- **Nothing runs until you open a Claude session** after the restart, unless `autostart` is on (Windows only): the
+  plugin lives inside Claude Code.
+- **`/sessions` knows the sessions since the plugin was installed,** for 14 days: it lists the plugin's records, not
+  every transcript.
+- **A `/rename` shows at the next turn,** and a transcript past 4 MiB keeps the name it had.
 
 ## Uninstall
 
 `/plugin uninstall session-restore@session-restore`. The records stay in `~/.claude/session-restore/` until you delete
-the folder.
+the folder. With `autostart` on, set it to `off` first (the plugin removes its Startup file at once), or delete
+`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\claude-session-restore.cmd` afterwards: no plugin runs at
+uninstall to remove it, and a claude would still open at each logon.
 
 ## Developing
 

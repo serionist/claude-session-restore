@@ -16,12 +16,16 @@ window, or resumed by hand, is left alone.
 | `/restore 2`, `/restore 1,3` | reopens some |
 | `/restore <id prefix>` | reopens the one whose session id starts so |
 | `/restore forget` | drops them from the list |
+| `/sessions [words]` | lists the sessions of every folder, or those whose name, prompt or folder holds the words |
+| `/sessions 3` | reopens one by its number, unless its claude still runs |
 
 Options (in `/config`):
 
 - `shell`, what a window leaves you in when claude exits: `powershell` (default), `pwsh`, `cmd`, or `none`, which
   closes it; on macOS and Linux, anything but `none` leaves your login shell.
 - `terminal` (macOS, Linux): `auto` (default), a terminal by name, or `print` for the commands instead.
+- `autostart` (Windows): `off` (default); `ask` opens a claude at logon that shows the band, `all` one that reopens
+  every session cut off by itself.
 
 Install it at the user scope, so it loads in every session. It keeps one small record per session in
 `~/.claude/session-restore/sessions/`, on this machine only.

@@ -35,6 +35,7 @@ type SessionLike = {
 type Lib = {
   runArgvScript(argv: readonly string[], dir: string, after?: string): string
   launchScript(planPath: string): string
+  AUTOSTART_SCRIPT: string
   encodePowerShell(script: string): string
   crtQuote(arg: string): string
   UTF8_OUTPUT: string
@@ -110,6 +111,7 @@ describe('the launcher in real PowerShell', { skip }, () => {
       const tab = lib.runArgvScript(['C:\\Users\\O’Brien\\claude.exe', ...HOSTILE], sessionDir, '& cmd.exe')
       assert.equal(parseErrors(shell, tab), 0)
       assert.equal(parseErrors(shell, lib.launchScript('C:/Users/O’Brien/.claude/session-restore/launch.json')), 0)
+      assert.equal(parseErrors(shell, lib.AUTOSTART_SCRIPT), 0)
     })
 
     test(`${shell}: the tab script starts the program in the session's folder, every argument whole`, () => {

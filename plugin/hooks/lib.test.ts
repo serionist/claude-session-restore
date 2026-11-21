@@ -3,7 +3,9 @@ import { describe, expect, test } from 'claude-code/testing'
 import type { SessionRecord } from '../types'
 import type { OpenTerminal, Shell } from './lib'
 import {
+  AUTOSTART_SCRIPT,
   appleScript,
+  autostartFile,
   claudeArgv,
   cleanDir,
   consoleStarts,
@@ -12,12 +14,15 @@ import {
   detached,
   encodePowerShell,
   isInterrupted,
+  isRunning,
   LINUX_TERMINALS,
+  labelOf,
   launchPlan,
   launchScript,
   MAX_AGE_MS,
   machineOf,
   manualCommand,
+  nameFromTranscript,
   parseLiveness,
   parseLookup,
   pickResumeFlags,
@@ -31,6 +36,7 @@ import {
   statusForEnd,
   tabArgv,
   terminalArgv,
+  transcriptPath,
   WT_LINE_MAX,
   wtLines,
 } from './lib'
@@ -358,5 +364,59 @@ describe('several machines sharing one records folder', () => {
     expect(isInterrupted(rec({ pid: 43, pidStarted: 'here|7', lastSeen: NOW - 30_000 }), NOW, alive)).toBe(true)
     expect(machineOf('here|7')).toBe('here')
     expect(machineOf('2026-10-28T10:00:00.0000000Z')).toBe(undefined)
+  })
+})
+
+describe('names and /sessions', () => {
+  test('the latest /rename wins over the name Claude Code chose, and the name over the first prompt', () => {
+    const text = [
+      '{"type":"custom-title","customTitle":"First","sessionId":"abc"}',
+      '{"type":"ai-title","aiTitle":"Chosen","sessionId":"abc"}',
+      '{"type":"custom-title","customTitle":"Gate F","sessionId":"abc"}',
+      '{"type":"user"}',
+    ].join('\n')
+    expect(nameFromTranscript(text)).toBe('Gate F')
+    expect(nameFromTranscript('{"type":"ai-title","aiTitle":"Chosen"}')).toBe('Chosen')
+    expect(nameFromTranscript('{"type":"custom-title","customTitle":"  "}\n{"type":"user"}')).toBe(undefined)
+    expect(nameFromTranscript('{"type":"custom-title" broken')).toBe(undefined)
+    expect(labelOf(rec({ name: 'Gate F', title: 'fix it' }))).toBe('Gate F')
+    expect(labelOf(rec({ title: 'fix it' }))).toBe('fix it')
+  })
+
+  test("the transcript is under its folder's name, every other character than a letter or digit a dash", () => {
+    expect(transcriptPath('C:/Users/t/.claude', 'H:\\NetCore Projects\\app', 'abc')).toBe(
+      'C:/Users/t/.claude/projects/H--NetCore-Projects-app/abc.jsonl',
+    )
+  })
+
+  test('a session runs while it is open and its process alive; any other is free to reopen', () => {
+    const alive = new Map([[7, 'start']])
+    expect(isRunning(rec({ pid: 7, pidStarted: 'start' }), NOW, alive)).toBe(true)
+    expect(isRunning(rec({ pid: 7, pidStarted: 'other' }), NOW, alive)).toBe(false)
+    expect(isRunning(rec({ pid: 7, pidStarted: 'start', status: 'closed' }), NOW, alive)).toBe(false)
+    // Older than a week: /restore no longer offers it, and it is still known not to run.
+    expect(isRunning(rec({ pid: 8, pidStarted: 'start' }), NOW + MAX_AGE_MS, alive)).toBe(false)
+    // No process listing: the heartbeat decides.
+    expect(isRunning(rec({ lastSeen: NOW - 30_000 }), NOW, null)).toBe(true)
+    expect(isRunning(rec({ lastSeen: NOW - STALE_MS - 1 }), NOW, null)).toBe(false)
+    // Restored a moment ago: its claude may still be starting, so it counts as running until its heartbeat would.
+    expect(isRunning(rec({ status: 'restored', lastSeen: NOW - 30_000 }), NOW, alive)).toBe(true)
+    expect(isRunning(rec({ status: 'restored', lastSeen: NOW - STALE_MS - 1 }), NOW, alive)).toBe(false)
+  })
+})
+
+describe('opening Claude when Windows starts', () => {
+  test('the Startup file runs fixed words and base64; the script it carries holds no path of a record', () => {
+    const file = autostartFile()
+    expect(file).toMatch(/^@echo off\r\npowershell\.exe [-\w ]+ -EncodedCommand [A-Za-z0-9+/=]+\r\n$/)
+    expect(file).toContain(encodePowerShell(AUTOSTART_SCRIPT))
+    // Set only inside the tab's own PowerShell: set here, Windows Terminal would hand it to every later tab.
+    expect(AUTOSTART_SCRIPT).toContain("\"`$env:SESSION_RESTORE_AUTOSTART = '1'; & ")
+    expect(AUTOSTART_SCRIPT.split('\n').some(line => line.trimStart().startsWith('$env:'))).toBe(false)
+    expect(AUTOSTART_SCRIPT).toContain('-w claude-restore new-tab')
+  })
+
+  test('the sessions a restore opens never carry the variable that restores without a click', () => {
+    expect(launchPlan([], 'powershell').env).toContain('SESSION_RESTORE_AUTOSTART')
   })
 })

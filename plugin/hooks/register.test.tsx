@@ -33,6 +33,10 @@ type WorldOptions = {
   failsFor?: string
   /** Off Windows: no claude this session can run (a path an update removed). */
   noClaude?: boolean
+  /** Variables beyond the system's own. */
+  env?: Record<string, string>
+  /** `$.env.set` is refused with this reason, as managed settings may. */
+  envSetDenied?: string
 }
 
 /** Answers the session and its files beneath the plugin; what it writes, runs, logs and toasts is kept. */
@@ -56,9 +60,18 @@ function world(on: On, options: WorldOptions = {}) {
     alive: '',
   }
   const unixEnv = { HOME: '/home/test', ...options.unix?.env }
-  mock.env(on, options.windows === false || options.unix ? unixEnv : { OS: 'Windows_NT', USERPROFILE: HOME })
+  // mock.env answers only get; the plugin unsets a variable too, which a later get must see.
+  const env: Record<string, string> =
+    options.windows === false || options.unix ? unixEnv : { OS: 'Windows_NT', USERPROFILE: HOME, ...options.env }
+  on('env.get', (_, e) => ({ value: env[e.name] }))
+  on('env.set', (_, e) => {
+    if (options.envSetDenied !== undefined) return { value: { deny: options.envSetDenied } }
+    if (e.value === undefined) delete env[e.name]
+    else env[e.name] = e.value
+    return { value: {} }
+  })
   const clock = mock.clock(on, { now: NOW })
-  on('command.register', () => ({ value: { command: 'restore' } }))
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.end', (_, e) => ({ sessionId: e.sessionId }))
   on('classic.SessionStart', () => ({}))
@@ -722,4 +735,233 @@ describe('choosing where a session opens, off Windows', () => {
 
     expect(text).toBe('No interrupted sessions.')
   })
+})
+
+type Run = { command: string; args: string }
+
+describe('the name', () => {
+  test('the record keeps the name /rename gave, read from the transcript, and the lists show it', async ($, on) => {
+    const transcript = [
+      '{"type":"user","message":"fix the band"}',
+      '{"type":"ai-title","aiTitle":"Band fix","sessionId":"own-session"}',
+      '{"type":"custom-title","customTitle":"Gate F","sessionId":"own-session"}',
+    ].join('\n')
+    const { written, clock } = world(on, {
+      files: { 'own-session.jsonl': transcript, 'cut-1.json': record('cut-1', { name: 'Old work', title: 'x' }) },
+    })
+    await $.session.start(START)
+    await clock.settle()
+
+    expect(lastWrite(written, 'own-session').name).toBe('Gate F')
+    expect(lastWrite(written, 'own-session').title).toBe('fix the band')
+    const run: Run = { command: 'sessions', args: '' }
+    const { text } = await $.command.run(run as Parameters<typeof $.command.run>[0])
+    expect(text).toContain('1. Old work - D:\\repos\\cut-1')
+  })
+
+  test('a session with no transcript to read keeps no name', async ($, on) => {
+    const { written, clock } = world(on)
+    await $.session.start(START)
+    await clock.settle()
+
+    expect(lastWrite(written, 'own-session').name).toBe(undefined)
+  })
+})
+
+describe('/sessions', () => {
+  const files = () => ({
+    'old.json': record('old', { status: 'closed', name: 'Gate F', cwd: 'E:\\gates', lastSeen: NOW - 60 * MINUTE }),
+    'live.json': record('live', { status: 'open', pid: 7, pidStarted: '2026-01-01T00:00:00.0000000Z' }),
+    'cut.json': record('cut', { lastSeen: NOW - 2 * MINUTE }),
+  })
+  const RUNNING = '7 2026-01-01T00:00:00.0000000Z'
+
+  test('lists every session of every folder, the latest first, a running one marked', async ($, on) => {
+    const { session, clock } = world(on, { files: files() })
+    session.alive = RUNNING
+    await $.session.start(START)
+    await clock.settle()
+
+    const run: Run = { command: 'sessions', args: '' }
+    const { text } = await $.command.run(run as Parameters<typeof $.command.run>[0])
+
+    expect(text).toContain('3 sessions:')
+    expect(text).toContain('  1. live - D:\\repos\\live, running,')
+    expect(text).toContain('  2. cut - D:\\repos\\cut, interrupted,')
+    expect(text).toContain('  3. Gate F - E:\\gates, closed, last active 1 h ago')
+  })
+
+  test('words filter by name, prompt or folder, and keep the numbers of the whole list', async ($, on) => {
+    const { clock } = world(on, { files: files() })
+    await $.session.start(START)
+    await clock.settle()
+
+    const found: Run = { command: 'sessions', args: 'gate f' }
+    const { text } = await $.command.run(found as Parameters<typeof $.command.run>[0])
+    expect(text).toContain('1 session:')
+    expect(text).toContain('  3. Gate F')
+
+    const none: Run = { command: 'sessions', args: 'nothing like it' }
+    const missed = await $.command.run(none as Parameters<typeof $.command.run>[0])
+    expect(missed.text).toBe('No session matches "nothing like it".')
+  })
+
+  test('a number reopens a session left on purpose, in its folder', async ($, on) => {
+    const { written, clock } = world(on, { files: files() })
+    await $.session.start(START)
+    await clock.settle()
+
+    const run: Run = { command: 'sessions', args: '3' }
+    const { text } = await $.command.run(run as Parameters<typeof $.command.run>[0])
+    await clock.settle()
+
+    expect(text).toBe('Reopened 1 session.')
+    const plan = JSON.parse(written.find(one => one.path.endsWith('/launch.json'))?.text ?? '{}')
+    expect(plan.consoles[0].dir).toBe('E:\\gates')
+    expect(lastWrite(written, 'old').status).toBe('restored')
+  })
+
+  test('a session whose claude still runs is never reopened', async ($, on) => {
+    const { written, session, clock } = world(on, { files: files() })
+    session.alive = RUNNING
+    await $.session.start(START)
+    await clock.settle()
+
+    const run: Run = { command: 'sessions', args: '1' }
+    const { text } = await $.command.run(run as Parameters<typeof $.command.run>[0])
+
+    expect(text).toBe('1 session was still running, or reopened less than 5 minutes ago, so it was left alone.')
+    expect(written.some(one => one.path.endsWith('/launch.json'))).toBe(false)
+  })
+
+  test('a number past the list says so, with the list', async ($, on) => {
+    const { clock } = world(on, { files: files() })
+    await $.session.start(START)
+    await clock.settle()
+
+    const run: Run = { command: 'sessions', args: '9' }
+    const { text } = await $.command.run(run as Parameters<typeof $.command.run>[0])
+    expect(text).toContain('No session is numbered "9".\n\n3 sessions:')
+  })
+})
+
+describe('opening Claude when Windows starts', () => {
+  const APPDATA = 'C:\\Users\\test\\AppData\\Roaming'
+  const STARTUP = '/Microsoft/Windows/Start Menu/Programs/Startup/claude-session-restore.cmd'
+
+  test(
+    'ask writes the Startup file: a hidden PowerShell, fixed words and base64',
+    { options: { autostart: 'ask' } },
+    async ($, on) => {
+      const { written, clock } = world(on, { env: { APPDATA } })
+      await $.session.start(START)
+      await clock.settle()
+
+      const file = written.find(one => one.path.endsWith(STARTUP))
+      expect(file?.path).toBe(`C:/Users/test/AppData/Roaming${STARTUP}`)
+      expect(file?.text.startsWith('@echo off\r\npowershell.exe -NoProfile -WindowStyle Hidden')).toBe(true)
+    },
+  )
+
+  test('off removes a Startup file left from before, its path as base64', async ($, on) => {
+    const { written, ran, clock } = world(on, { env: { APPDATA } })
+    await $.session.start(START)
+    await clock.settle()
+
+    expect(written.some(one => one.path.endsWith(STARTUP))).toBe(false)
+    const removal = ran.map(scriptOf).find(script => script.includes('Remove-Item -LiteralPath'))
+    expect(removal).toContain('FromBase64String')
+    expect(removal?.includes('Startup')).toBe(false)
+  })
+
+  test(
+    'all: the session Windows started restores every session cut off by itself',
+    { options: { autostart: 'all' } },
+    async ($, on) => {
+      const { written, logs, clock } = world(on, {
+        env: { APPDATA, SESSION_RESTORE_AUTOSTART: '1' },
+        files: { 'cut-1.json': record('cut-1') },
+      })
+      await $.session.start(START)
+      await clock.settle()
+
+      expect(lastWrite(written, 'cut-1').status).toBe('restored')
+      expect(logs).toContain('Reopened 1 session.')
+    },
+  )
+
+  test(
+    'all: a session someone opened restores nothing without a click',
+    { options: { autostart: 'all' } },
+    async ($, on) => {
+      const { written, clock } = world(on, { env: { APPDATA }, files: { 'cut-1.json': record('cut-1') } })
+      await $.session.start(START)
+      await clock.settle()
+
+      expect(written.some(one => one.path.endsWith('/launch.json'))).toBe(false)
+    },
+  )
+})
+
+describe('review round 1 regressions', () => {
+  test(
+    'all: a reload of the logon session restores nothing closed since (F1)',
+    { options: { autostart: 'all' } },
+    async ($, on) => {
+      const { files, written, clock } = world(on, {
+        env: { APPDATA: 'C:\\Users\\test\\AppData\\Roaming', SESSION_RESTORE_AUTOSTART: '1' },
+        files: { 'cut-1.json': record('cut-1') },
+      })
+      await $.session.start(START)
+      await clock.settle()
+      expect(lastWrite(written, 'cut-1').status).toBe('restored')
+
+      // The person closes a restored tab, a signal: interrupted. Then an option changes, and the plugin reloads.
+      files['cut-2.json'] = record('cut-2')
+      await $.session.start(START)
+      await clock.settle()
+
+      expect(written.some(one => one.path.endsWith(`${SESSIONS}/cut-2.json`))).toBe(false)
+    },
+  )
+
+  test('off Windows, nothing is written to a Startup folder (F7)', { options: { autostart: 'all' } }, async ($, on) => {
+    const { written, clock } = world(on, { unix: { name: 'Linux' } })
+    await $.session.start(START)
+    await clock.settle()
+
+    expect(written.some(one => one.path.includes('Startup'))).toBe(false)
+  })
+
+  test('/sessions does not reopen a session it restored seconds ago, before its claude saved (F4)', async ($, on) => {
+    const closed = record('old', { status: 'closed', lastSeen: NOW - 60 * MINUTE })
+    const { written, clock } = world(on, { files: { 'old.json': closed } })
+    await $.session.start(START)
+    await clock.settle()
+
+    const run = { command: 'sessions', args: '1' } as Parameters<typeof $.command.run>[0]
+    expect((await $.command.run(run)).text).toBe('Reopened 1 session.')
+    await clock.advance(MINUTE)
+    const again = await $.command.run(run)
+
+    expect(again.text).toBe('1 session was still running, or reopened less than 5 minutes ago, so it was left alone.')
+    expect(written.filter(one => one.path.endsWith('/launch.json')).length).toBe(1)
+  })
+
+  test(
+    'all: a logon session that cannot unset the variable restores nothing (N1)',
+    { options: { autostart: 'all' } },
+    async ($, on) => {
+      const { written, logs, clock } = world(on, {
+        env: { APPDATA: 'C:Users\testAppDataRoaming', SESSION_RESTORE_AUTOSTART: '1' },
+        envSetDenied: 'held by managed settings',
+        files: { 'cut-1.json': record('cut-1') },
+      })
+      await $.session.start(START)
+      await clock.settle()
+
+      expect(written.some(one => one.path.endsWith('/launch.json'))).toBe(false)
+      expect(logs.some(line => line.includes("can't be unset: held by managed settings"))).toBe(true)
+    },
+  )
 })

@@ -20,7 +20,7 @@ crash, a restart or a closed terminal cut off. The repo is its own marketplace.
 
 | Path | What |
 |---|---|
-| `plugin/` | the plugin: `.claude-plugin/plugin.json` (name, version, the `shell` and `terminal` options), `hooks/` (`hooks.json`, `register.tsx`, `lib.ts`, and their tests `register.test.tsx`, `lib.test.ts`), `types/index.d.ts`, `tsconfig.json`, `README.md` |
+| `plugin/` | the plugin: `.claude-plugin/plugin.json` (name, version, the `shell`, `terminal` and `autostart` options), `hooks/` (`hooks.json`, `register.tsx`, `lib.ts`, and their tests `register.test.tsx`, `lib.test.ts`), `types/index.d.ts`, `tsconfig.json`, `README.md` |
 | `.claude-plugin/marketplace.json` | the marketplace: one plugin, source `./plugin` |
 | `docs/` | `design.md` (how it works), `releasing.md`, `testing-by-hand.md` (a real window, on each system); `plans/`, `reviews/`: dated records, never current truth |
 | `tools/` | `gate.ts` (the gate), `hooks.ts` (behind `.githooks/`), `setup.ts` (once per clone; `link` for skills), `gate.test.ts`, `launcher.test.ts` (the restore scripts run for real: PowerShell on Windows, `sh` on macOS and Linux), `try-restore.sh` (the by-hand test's setup and check); Node's standard library only |
@@ -94,7 +94,8 @@ in `0.x` a minor may break one, under CHANGELOG's Breaking.
 
 - the plugin's and the marketplace's name, `session-restore`;
 - the `/restore` command and its arguments (`all`, numbers, an id prefix, `forget`);
-- the `shell` and `terminal` options, their names and their values;
+- the `/sessions` command and its arguments (words, numbers);
+- the `shell`, `terminal` and `autostart` options, their names and their values;
 - the record folder, `<config>/session-restore/sessions/`, and the record's fields: a new version reads the records an
   older one wrote, so a field is added, never renamed or retyped.
 
@@ -114,12 +115,13 @@ What this code already paid for; `docs/design.md` has the detail.
 | Windows PowerShell writes to a pipe in the console's code page, garbling `C:\Users\Sóma` | `runPowerShell` | UTF-8 output first |
 | A shell `cd` in a tool moved `cwd()`, and the restore opened a folder `--resume` can't find the session from | `sync` | The record keeps `root()` |
 | The process lookup failed at startup, while MCP servers spawn | `beat` | Tried again at heartbeats 1, 3, 7 and 15, then no more |
-| The band acted on the list as last scanned, and reopened a session already restored or resumed | `stillCutOff` | Restore and Dismiss scan again, one at a time |
+| The band acted on the list as last scanned, and reopened a session already restored or resumed | `stillReopenable` | Restore and Dismiss scan again, one at a time |
 | tmux reads `new-window -c <folder>` as a format, where `#(...)` runs a command | `terminalArgv` | No terminal gets the folder; the script `cd`s |
 | Most Linux terminals run until their window closes, Ubuntu's `x-terminal-emulator` on purpose, and a call past 30 s is killed with the window | `detached` | Started apart with `setsid -f` |
 | Linux derives `ps`'s start time from the wall clock, which a laptop's wake can step | `PROCESSES`, `LOOKUP` | The boot id and the start tick, from /proc |
 | A heartbeat's save landed after `/exit` closed the record, and the dead session was offered | `sync`, `save` | A count of ends; one write queue |
 | A session with no prompt has no transcript, and `--resume` finds nothing | `sync` | Tracked from its first turn |
+| A reload starts the logon session again, which restored, without a click, sessions closed since | `track` | `SESSION_RESTORE_AUTOSTART` unset once read |
 
 ## Look up APIs before coding against them
 
